@@ -6,7 +6,6 @@ local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
-local GuiService = game:GetService("GuiService")
 
 local Config = require(RS:WaitForChild("ScooterConfig"))
 Config.P = require(script:WaitForChild("Plot")) -- this player's plot (see the Plot module)
@@ -16,7 +15,7 @@ Config.Fun = require(script:WaitForChild("Fun")) -- customers' chatter, antics a
 local Remotes = RS:WaitForChild("ScooterRemotes")
 local Templates = RS:WaitForChild("Scooters")
 local StationTemplates = RS:WaitForChild("Stations")
-local ToolModels = RS:WaitForChild("Tools")
+RS:WaitForChild("Tools") -- the tool models are in before any fix starts
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -54,20 +53,23 @@ end
 
 -- Feel (plan/12): one impact knob — a short camera shake while the bench owns the camera.
 -- Misses, blow-outs, big pays and upgrades call it with a magnitude; it never stacks hard.
-local shakeMag, shakeUntil = 0, 0
-local function shake(mag, time)
-	shakeMag = math.max(shakeMag, mag or 0.15)
-	shakeUntil = os.clock() + (time or 0.25)
+local shake
+do
+	local shakeMag, shakeUntil = 0, 0
+	shake = function(mag, time)
+		shakeMag = math.max(shakeMag, mag or 0.15)
+		shakeUntil = os.clock() + (time or 0.25)
+	end
+	RunService.RenderStepped:Connect(function()
+		local left = shakeUntil - os.clock()
+		if left <= 0 or shakeMag <= 0 then return end
+		if camera.CameraType ~= Enum.CameraType.Scriptable then return end -- never fights the free camera
+		local k = math.min(1, left / 0.25) * shakeMag
+		camera.CFrame = camera.CFrame * CFrame.Angles(
+			(math.random() - 0.5) * k * 0.05, (math.random() - 0.5) * k * 0.05, (math.random() - 0.5) * k * 0.015)
+		if left <= 0.03 then shakeMag = 0 end
+	end)
 end
-RunService.RenderStepped:Connect(function()
-	local left = shakeUntil - os.clock()
-	if left <= 0 or shakeMag <= 0 then return end
-	if camera.CameraType ~= Enum.CameraType.Scriptable then return end -- never fights the free camera
-	local k = math.min(1, left / 0.25) * shakeMag
-	camera.CFrame = camera.CFrame * CFrame.Angles(
-		(math.random() - 0.5) * k * 0.05, (math.random() - 0.5) * k * 0.05, (math.random() - 0.5) * k * 0.015)
-	if left <= 0.03 then shakeMag = 0 end
-end)
 
 local RARITY = {}
 for i, r in Config.Rarities do
@@ -208,82 +210,85 @@ end
 ---------------------------------------------------------------- effects
 -- Parts to work on get a bright outline plus a glossy shine that keeps
 -- sweeping over them (a ForceField-material shell), coloured by the job's rarity.
-local glows = {} -- { highlight, shell, part }
-local glowFolder = Instance.new("Folder")
-glowFolder.Name = "Glints"
-glowFolder.Parent = workspace
-local SHELL = 1.05 -- the shine shell sits just outside the part
-local function glowColor()
-	local r = active and RARITY[active.job.Rarity]
-	return (r and r.Glow) or Config.Rarities[1].Glow
-end
--- Roblox only draws ~31 Highlights, so a long list (a rack full of tyres or batteries)
--- shares one highlight over the parts' own shine shells: only those parts glow, not the
--- rest of the machine (the charger on the battery station).
-local function glow(parts)
-	local col = glowColor()
-	local group = #parts > 6 and Instance.new("Model")
-	if group then
-		group.Name = "GlowGroup"
-		local h = Instance.new("Highlight")
-		h.Adornee = group
-		h.FillColor = col
-		h.OutlineTransparency = 1
-		h.DepthMode = Enum.HighlightDepthMode.Occluded
-		h.Parent = group
-		group.Parent = glowFolder
-		table.insert(glows, { h = h, group = group })
+local glow, unglow
+do
+	local glows = {} -- { highlight, shell, part }
+	local glowFolder = Instance.new("Folder")
+	glowFolder.Name = "Glints"
+	glowFolder.Parent = workspace
+	local SHELL = 1.05 -- the shine shell sits just outside the part
+	local function glowColor()
+		local r = active and RARITY[active.job.Rarity]
+		return (r and r.Glow) or Config.Rarities[1].Glow
 	end
-	for _, p in parts do
-		local h = not group and Instance.new("Highlight")
-		if h then
-			h.Adornee = p
+	-- Roblox only draws ~31 Highlights, so a long list (a rack full of tyres or batteries)
+	-- shares one highlight over the parts' own shine shells: only those parts glow, not the
+	-- rest of the machine (the charger on the battery station).
+	glow = function(parts)
+		local col = glowColor()
+		local group = #parts > 6 and Instance.new("Model")
+		if group then
+			group.Name = "GlowGroup"
+			local h = Instance.new("Highlight")
+			h.Adornee = group
 			h.FillColor = col
-			h.OutlineTransparency = 1 -- outlines render jaggy; the fill and shine read smoothly
+			h.OutlineTransparency = 1
 			h.DepthMode = Enum.HighlightDepthMode.Occluded
-			h.Parent = p
+			h.Parent = group
+			group.Parent = glowFolder
+			table.insert(glows, { h = h, group = group })
 		end
-		local shell = p:Clone()
-		shell:ClearAllChildren()
-		shell.Name = "Shine"
-		shell.Material = Enum.Material.ForceField
-		shell.Color = col
-		shell.Transparency = 0
-		shell.Anchored = true
-		shell.CanCollide = false
-		shell.CanQuery = false
-		shell.CanTouch = false
-		shell.CastShadow = false
-		shell.Size = p.Size * SHELL
-		shell.CFrame = p.CFrame
-		shell.Parent = group or glowFolder
-		table.insert(glows, { h = h, shell = shell, part = p })
-	end
-end
-local function unglow()
-	for _, g in glows do
-		if g.h then g.h:Destroy() end
-		if g.shell then g.shell:Destroy() end
-		if g.group then g.group:Destroy() end
-	end
-	table.clear(glows)
-end
-RunService.RenderStepped:Connect(function()
-	local a = 0.35 + math.sin(os.clock() * 6) * 0.22
-	for _, g in glows do
-		if g.h then g.h.FillTransparency = a end
-		-- the shell follows the part (parts move and resize during fixes)
-		if not g.part then
-			continue
-		elseif g.part.Parent then
-			g.shell.CFrame = g.part.CFrame
-			g.shell.Size = g.part.Size * SHELL
-			g.shell.Transparency = g.part.Transparency > 0.9 and 1 or 0
-		else
-			g.shell.Transparency = 1
+		for _, p in parts do
+			local h = not group and Instance.new("Highlight")
+			if h then
+				h.Adornee = p
+				h.FillColor = col
+				h.OutlineTransparency = 1 -- outlines render jaggy; the fill and shine read smoothly
+				h.DepthMode = Enum.HighlightDepthMode.Occluded
+				h.Parent = p
+			end
+			local shell = p:Clone()
+			shell:ClearAllChildren()
+			shell.Name = "Shine"
+			shell.Material = Enum.Material.ForceField
+			shell.Color = col
+			shell.Transparency = 0
+			shell.Anchored = true
+			shell.CanCollide = false
+			shell.CanQuery = false
+			shell.CanTouch = false
+			shell.CastShadow = false
+			shell.Size = p.Size * SHELL
+			shell.CFrame = p.CFrame
+			shell.Parent = group or glowFolder
+			table.insert(glows, { h = h, shell = shell, part = p })
 		end
 	end
-end)
+	unglow = function()
+		for _, g in glows do
+			if g.h then g.h:Destroy() end
+			if g.shell then g.shell:Destroy() end
+			if g.group then g.group:Destroy() end
+		end
+		table.clear(glows)
+	end
+	RunService.RenderStepped:Connect(function()
+		local a = 0.35 + math.sin(os.clock() * 6) * 0.22
+		for _, g in glows do
+			if g.h then g.h.FillTransparency = a end
+			-- the shell follows the part (parts move and resize during fixes)
+			if not g.part then
+				continue
+			elseif g.part.Parent then
+				g.shell.CFrame = g.part.CFrame
+				g.shell.Size = g.part.Size * SHELL
+				g.shell.Transparency = g.part.Transparency > 0.9 and 1 or 0
+			else
+				g.shell.Transparency = 1
+			end
+		end
+	end)
+end
 
 -- Cartoon ink outlines on things you use and the people around (not the room
 -- shell: an outlined floor puts an ink ring round everything standing on it).
@@ -291,27 +296,30 @@ end)
 -- scooter, person and fixed prop gets its own.
 -- Highlight outlines aren't anti-aliased: solid black looked jaggy (owner, 22 Oct),
 -- so the ink is partly see-through to soften the edges.
-local OUTLINES = true
-local INK = Color3.fromRGB(0, 0, 0)
-local INK_TRANSPARENCY = 0.4
-local outlineFolder = Instance.new("Folder")
-outlineFolder.Name = "CelOutlines"
-outlineFolder.Parent = workspace
--- keeps Highlights under Roblox's cap: glows always win, these outlines share the rest (plan/11)
-Config.Highlights = require(script:WaitForChild("Highlights"))
-task.spawn(Config.Highlights.init)
-local function outline(target)
-	if not (OUTLINES and target) then return end
-	local h = Instance.new("Highlight")
-	h.Name = target.Name
-	h.Adornee = target
-	h.FillTransparency = 1
-	h.OutlineColor = INK
-	h.OutlineTransparency = INK_TRANSPARENCY
-	h.DepthMode = Enum.HighlightDepthMode.Occluded
-	h.Parent = outlineFolder
-	target.Destroying:Connect(function() h:Destroy() end)
-	return h
+local outline
+do
+	local OUTLINES = true
+	local INK = Color3.fromRGB(0, 0, 0)
+	local INK_TRANSPARENCY = 0.4
+	local outlineFolder = Instance.new("Folder")
+	outlineFolder.Name = "CelOutlines"
+	outlineFolder.Parent = workspace
+	-- keeps Highlights under Roblox's cap: glows always win, these outlines share the rest (plan/11)
+	Config.Highlights = require(script:WaitForChild("Highlights"))
+	task.spawn(Config.Highlights.init)
+	outline = function(target)
+		if not (OUTLINES and target) then return end
+		local h = Instance.new("Highlight")
+		h.Name = target.Name
+		h.Adornee = target
+		h.FillTransparency = 1
+		h.OutlineColor = INK
+		h.OutlineTransparency = INK_TRANSPARENCY
+		h.DepthMode = Enum.HighlightDepthMode.Occluded
+		h.Parent = outlineFolder
+		target.Destroying:Connect(function() h:Destroy() end)
+		return h
+	end
 end
 
 local function emit(at, props, count)
@@ -361,23 +369,25 @@ end
 
 -- Belt slats creep along while anything rides the conveyor.
 local beltRunning = 0
-local slats, slatMin, slatMax = {}, math.huge, -math.huge
-for _, p in garage:WaitForChild("Conveyor"):GetChildren() do
-	if p.Name == "Slat" then
-		table.insert(slats, p)
-		slatMin = math.min(slatMin, p.Position.Z)
-		slatMax = math.max(slatMax, p.Position.Z)
+do
+	local slats, slatMin, slatMax = {}, math.huge, -math.huge
+	for _, p in garage:WaitForChild("Conveyor"):GetChildren() do
+		if p.Name == "Slat" then
+			table.insert(slats, p)
+			slatMin = math.min(slatMin, p.Position.Z)
+			slatMax = math.max(slatMax, p.Position.Z)
+		end
 	end
+	local slatSpan = slatMax - slatMin + 1.5
+	RunService.RenderStepped:Connect(function(dt)
+		if beltRunning <= 0 then return end
+		for _, p in slats do
+			local z = p.Position.Z + dt * 7
+			if z > slatMax + 0.75 then z -= slatSpan end
+			p.CFrame = CFrame.new(p.Position.X, p.Position.Y, z)
+		end
+	end)
 end
-local slatSpan = slatMax - slatMin + 1.5
-RunService.RenderStepped:Connect(function(dt)
-	if beltRunning <= 0 then return end
-	for _, p in slats do
-		local z = p.Position.Z + dt * 7
-		if z > slatMax + 0.75 then z -= slatSpan end
-		p.CFrame = CFrame.new(p.Position.X, p.Position.Y, z)
-	end
-end)
 
 local function slideModel(model, to, time, style, onBelt)
 	local from = model:GetPivot()
@@ -645,128 +655,131 @@ end
 -- The pump hose is a real rope: a chain of points with gravity, pinned at the
 -- pump outlet and the nozzle. It hangs, lies on the floor and drapes over the
 -- bench edge instead of cutting through anything.
-local HOSE = { Points = 28, Length = 9, Thickness = 0.2, Gravity = 70, Color = Color3.fromRGB(32, 33, 38) }
-local hose -- { pump, a, b, pos, prev, parts }
-local benchBox -- solid volume of the bench: hoses can't go inside it
+local makeHose
 do
-	local top = bench:WaitForChild("Mat")
-	local stand = bench:WaitForChild("StandBase")
-	local half = stand.Size / 2
-	local sp, tp = Config.P.toLocal(stand.Position), Config.P.toLocal(top.Position)
-	benchBox = {
-		min = Vector3.new(sp.X - half.X, -math.huge, sp.Z - half.Z),
-		max = Vector3.new(sp.X + half.X, tp.Y + top.Size.Y / 2, sp.Z + half.Z),
-	}
-end
-
-local function makeHose(pump)
-	if hose then
-		for _, p in hose.parts do p:Destroy() end
-		hose = nil
-	end
-	local a = pump.BaseCap:FindFirstChild("HoseStart")
-	local b = pump.Nozzle:FindFirstChild("HoseEnd")
-	if not (a and b) then return end
-	local from, to = a.WorldPosition, b.WorldPosition
-	local h = { pump = pump, a = a, b = b, pos = {}, prev = {}, parts = {} }
-	for i = 1, HOSE.Points do
-		local p = from:Lerp(to, (i - 1) / (HOSE.Points - 1))
-		h.pos[i], h.prev[i] = p, p
-	end
-	for i = 1, HOSE.Points - 1 do
-		local seg = Instance.new("Part")
-		seg.Name = "Hose"
-		seg.Shape = Enum.PartType.Cylinder
-		seg.Anchored = true
-		seg.CanCollide = false
-		seg.CanQuery = false
-		seg.CanTouch = false
-		seg.CastShadow = false
-		seg.Color = HOSE.Color
-		seg.Material = Enum.Material.SmoothPlastic
-		seg.Parent = pump
-		h.parts[i] = seg
-	end
-	hose = h
-end
-
-local function hoseCollide(p, floorY)
-	p = Config.P.toLocal(p)
-	local r = HOSE.Thickness / 2
-	if p.Y < floorY + r then p = Vector3.new(p.X, floorY + r, p.Z) end
-	local lo, hi = benchBox.min - Vector3.one * r, benchBox.max + Vector3.one * r
-	if p.X > lo.X and p.X < hi.X and p.Z > lo.Z and p.Z < hi.Z and p.Y < hi.Y then
-		-- inside the bench: push out the shortest way (over the top or out a side)
-		local outs = {
-			{ hi.Y - p.Y, Vector3.new(p.X, hi.Y, p.Z) },
-			{ p.X - lo.X, Vector3.new(lo.X, p.Y, p.Z) },
-			{ hi.X - p.X, Vector3.new(hi.X, p.Y, p.Z) },
-			{ p.Z - lo.Z, Vector3.new(p.X, p.Y, lo.Z) },
-			{ hi.Z - p.Z, Vector3.new(p.X, p.Y, hi.Z) },
+	local HOSE = { Points = 28, Length = 9, Thickness = 0.2, Gravity = 70, Color = Color3.fromRGB(32, 33, 38) }
+	local hose -- { pump, a, b, pos, prev, parts }
+	local benchBox -- solid volume of the bench: hoses can't go inside it
+	do
+		local top = bench:WaitForChild("Mat")
+		local stand = bench:WaitForChild("StandBase")
+		local half = stand.Size / 2
+		local sp, tp = Config.P.toLocal(stand.Position), Config.P.toLocal(top.Position)
+		benchBox = {
+			min = Vector3.new(sp.X - half.X, -math.huge, sp.Z - half.Z),
+			max = Vector3.new(sp.X + half.X, tp.Y + top.Size.Y / 2, sp.Z + half.Z),
 		}
-		local best = outs[1]
-		for _, o in outs do
-			if o[1] < best[1] then best = o end
-		end
-		p = best[2]
 	end
-	return Config.P.toWorld(p)
-end
 
-local function stepHose(h, dt)
-	local n = HOSE.Points
-	local seg = HOSE.Length / (n - 1)
-	local floorY = h.pump:GetPivot().Position.Y
-	local g = Vector3.new(0, -HOSE.Gravity * dt * dt, 0)
-	local pos, prev = h.pos, h.prev
-	for i = 2, n - 1 do
-		local p = pos[i]
-		local v = (p - prev[i]) * 0.97
-		-- rubbing on the floor or the bench top slows it down
-		if p.Y <= floorY + HOSE.Thickness * 0.6 or math.abs(p.Y - benchBox.max.Y - HOSE.Thickness / 2) < 0.05 then
-			v = Vector3.new(v.X * 0.6, v.Y, v.Z * 0.6)
+	makeHose = function(pump)
+		if hose then
+			for _, p in hose.parts do p:Destroy() end
+			hose = nil
 		end
-		prev[i] = p
-		pos[i] = p + v + g
+		local a = pump.BaseCap:FindFirstChild("HoseStart")
+		local b = pump.Nozzle:FindFirstChild("HoseEnd")
+		if not (a and b) then return end
+		local from, to = a.WorldPosition, b.WorldPosition
+		local h = { pump = pump, a = a, b = b, pos = {}, prev = {}, parts = {} }
+		for i = 1, HOSE.Points do
+			local p = from:Lerp(to, (i - 1) / (HOSE.Points - 1))
+			h.pos[i], h.prev[i] = p, p
+		end
+		for i = 1, HOSE.Points - 1 do
+			local seg = Instance.new("Part")
+			seg.Name = "Hose"
+			seg.Shape = Enum.PartType.Cylinder
+			seg.Anchored = true
+			seg.CanCollide = false
+			seg.CanQuery = false
+			seg.CanTouch = false
+			seg.CastShadow = false
+			seg.Color = HOSE.Color
+			seg.Material = Enum.Material.SmoothPlastic
+			seg.Parent = pump
+			h.parts[i] = seg
+		end
+		hose = h
 	end
-	pos[1], pos[n] = h.a.WorldPosition, h.b.WorldPosition
-	for _ = 1, 16 do
-		for i = 1, n - 1 do
-			local p1, p2 = pos[i], pos[i + 1]
-			local d = p2 - p1
-			local len = d.Magnitude
-			if len > 1e-4 then
-				local fix = d * ((len - seg) / len)
-				if i == 1 then
-					pos[i + 1] = p2 - fix
-				elseif i + 1 == n then
-					pos[i] = p1 + fix
-				else
-					pos[i] = p1 + fix * 0.5
-					pos[i + 1] = p2 - fix * 0.5
+
+	local function hoseCollide(p, floorY)
+		p = Config.P.toLocal(p)
+		local r = HOSE.Thickness / 2
+		if p.Y < floorY + r then p = Vector3.new(p.X, floorY + r, p.Z) end
+		local lo, hi = benchBox.min - Vector3.one * r, benchBox.max + Vector3.one * r
+		if p.X > lo.X and p.X < hi.X and p.Z > lo.Z and p.Z < hi.Z and p.Y < hi.Y then
+			-- inside the bench: push out the shortest way (over the top or out a side)
+			local outs = {
+				{ hi.Y - p.Y, Vector3.new(p.X, hi.Y, p.Z) },
+				{ p.X - lo.X, Vector3.new(lo.X, p.Y, p.Z) },
+				{ hi.X - p.X, Vector3.new(hi.X, p.Y, p.Z) },
+				{ p.Z - lo.Z, Vector3.new(p.X, p.Y, lo.Z) },
+				{ hi.Z - p.Z, Vector3.new(p.X, p.Y, hi.Z) },
+			}
+			local best = outs[1]
+			for _, o in outs do
+				if o[1] < best[1] then best = o end
+			end
+			p = best[2]
+		end
+		return Config.P.toWorld(p)
+	end
+
+	local function stepHose(h, dt)
+		local n = HOSE.Points
+		local seg = HOSE.Length / (n - 1)
+		local floorY = h.pump:GetPivot().Position.Y
+		local g = Vector3.new(0, -HOSE.Gravity * dt * dt, 0)
+		local pos, prev = h.pos, h.prev
+		for i = 2, n - 1 do
+			local p = pos[i]
+			local v = (p - prev[i]) * 0.97
+			-- rubbing on the floor or the bench top slows it down
+			if p.Y <= floorY + HOSE.Thickness * 0.6 or math.abs(p.Y - benchBox.max.Y - HOSE.Thickness / 2) < 0.05 then
+				v = Vector3.new(v.X * 0.6, v.Y, v.Z * 0.6)
+			end
+			prev[i] = p
+			pos[i] = p + v + g
+		end
+		pos[1], pos[n] = h.a.WorldPosition, h.b.WorldPosition
+		for _ = 1, 16 do
+			for i = 1, n - 1 do
+				local p1, p2 = pos[i], pos[i + 1]
+				local d = p2 - p1
+				local len = d.Magnitude
+				if len > 1e-4 then
+					local fix = d * ((len - seg) / len)
+					if i == 1 then
+						pos[i + 1] = p2 - fix
+					elseif i + 1 == n then
+						pos[i] = p1 + fix
+					else
+						pos[i] = p1 + fix * 0.5
+						pos[i + 1] = p2 - fix * 0.5
+					end
 				end
 			end
-		end
-		for i = 2, n - 1 do pos[i] = hoseCollide(pos[i], floorY) end
-	end
-end
-
-local function drawHose(h)
-	for i, part in h.parts do
-		local p1, p2 = h.pos[i], h.pos[i + 1]
-		local len = (p2 - p1).Magnitude
-		part.Size = Vector3.new(len + HOSE.Thickness * 0.6, HOSE.Thickness, HOSE.Thickness)
-		if len > 1e-4 then
-			part.CFrame = CFrame.lookAt((p1 + p2) / 2, p2) * CFrame.Angles(0, math.pi / 2, 0)
+			for i = 2, n - 1 do pos[i] = hoseCollide(pos[i], floorY) end
 		end
 	end
-end
 
-RunService.Heartbeat:Connect(function(dt)
-	if not (hose and hose.pump.Parent) then return end
-	stepHose(hose, math.min(dt, 1 / 30))
-	drawHose(hose)
-end)
+	local function drawHose(h)
+		for i, part in h.parts do
+			local p1, p2 = h.pos[i], h.pos[i + 1]
+			local len = (p2 - p1).Magnitude
+			part.Size = Vector3.new(len + HOSE.Thickness * 0.6, HOSE.Thickness, HOSE.Thickness)
+			if len > 1e-4 then
+				part.CFrame = CFrame.lookAt((p1 + p2) / 2, p2) * CFrame.Angles(0, math.pi / 2, 0)
+			end
+		end
+	end
+
+	RunService.Heartbeat:Connect(function(dt)
+		if not (hose and hose.pump.Parent) then return end
+		stepHose(hose, math.min(dt, 1 / 30))
+		drawHose(hose)
+	end)
+end
 
 -- Battery stock: a little battery with the count floats over the holder.
 local BATTERY_PACK
@@ -1338,16 +1351,6 @@ local function tapOn(parts)
 	end
 end
 
--- Where the finger is on the drag plane in front of the bench.
-local function pointerOnPlane(z) -- z is a plot-0 z; the plane is the plot's, whichever way it faces
-	local ray = camera:ScreenPointToRay(pointer.X, pointer.Y)
-	local o, d = Config.P.toLocal(ray.Origin), Config.P.ivec(ray.Direction)
-	if math.abs(d.Z) < 1e-3 then return nil end
-	local t = (z - o.Z) / d.Z
-	if t <= 0 then return nil end
-	return Config.P.toWorld(o + d * t)
-end
-
 -- Old parts pile up in the parts bin on the bench until you take the trash out
 -- at closing time.
 local binCount = 0
@@ -1414,13 +1417,6 @@ local function clearBin()
 	end
 end
 clearBin() -- the bin starts the day empty
-
----------------------------------------------------------------- hands-on at the bench
--- Some fixes are done by your own character instead of close-up hands: the
--- scooter slides to the front edge of the bench, you step up to it and IK puts
--- your hands on the job while your idle animation keeps playing.
-local BENCH_STAND = 0.95 -- from the bench edge to where you stand
-local BENCH_CAM = Vector3.new(4.5, 5.1, 1.45) -- camera relative to you: right, high, a little behind (sees your hands on the job)
 
 ---------------------------------------------------------------- minigames
 local FIX = {}
@@ -4247,95 +4243,98 @@ end
 
 -- Every scooter that comes in is painted in its colourway (Config.Paints, picked
 -- by the server). Parts are coloured by name, so new model versions just work.
-local BODY = {
-	Deck = true, DeckNose = true, DeckTail = true, Stem = true, RearFender = true, FrontFender = true, BatteryBay = true,
-	HandGuardL = true, HandGuardR = true, BatteryBlock = true, -- Bolt X
-}
-local TRIM = {
-	Handlebar = true, StemClamp = true, StemCollar = true, ForkL = true, ForkR = true, ForkCollarL = true, ForkCollarR = true,
-	SwingArm = true, RearRack = true, FrontAxle = true, RearAxle = true, FenderBolt = true, LightRim = true, TailLightRim = true,
-	Bolt1 = true, Bolt2 = true, Bolt3 = true,
-	-- Bolt X
-	ForkCrown = true, ForkLowerL = true, ForkLowerR = true, HeadCollar = true, SteerTube = true, RearShock = true, RearShockL = true,
-	SwingArmL = true, LightRim2 = true, LightBar = true,
-	-- kick scooters (Courier)
-	Basket = true, BasketMount = true, PhoneMount = true,
-}
--- rims, and Bolt X's springs in the same accent colour
-local RIMS = { TyreFrontHub = true, TyreRearHub = true, SpringL = true, SpringR = true, RearSpring = true, RearSpringL = true }
-local RUBBER = { TyreFront = true, TyreRear = true, Grip = true, DeckGrip = true }
-local FIXED = {
-	Screen = Color3.fromRGB(30, 33, 42), Light = Color3.fromRGB(255, 245, 200), Light2 = Color3.fromRGB(255, 245, 200), TailLight = Color3.fromRGB(230, 50, 50),
-	Battery = Color3.fromRGB(60, 63, 72), BatteryCap = Color3.fromRGB(240, 190, 60),
-	DeckLight = Color3.fromRGB(255, 245, 200), Phone = Color3.fromRGB(40, 42, 50), PhoneScreen = Color3.fromRGB(70, 140, 245),
-}
-local PAINT = {}
-for _, p in Config.Paints do PAINT[p.Name] = p end
--- Scooter models come straight from Blender: parts may sit in sub-models, be
--- unanchored, face either way or carry export names ("Grip.001"). Tidy all of
--- that when a scooter spawns, so a new version of a model can be dropped into
--- ReplicatedStorage.Scooters without touching the code.
-local function prepScooter(m)
-	for _, d in m:GetDescendants() do
-		if d:IsA("BasePart") then
-			d.Anchored = true
-			d.CanCollide = false
-			d.Name = (d.Name:gsub("%.%d+$", ""))
-			if d.Parent ~= m then d.Parent = m end
-		elseif d:IsA("JointInstance") or d:IsA("WeldConstraint") then
-			d:Destroy()
+local prepScooter, paint
+do
+	local BODY = {
+		Deck = true, DeckNose = true, DeckTail = true, Stem = true, RearFender = true, FrontFender = true, BatteryBay = true,
+		HandGuardL = true, HandGuardR = true, BatteryBlock = true, -- Bolt X
+	}
+	local TRIM = {
+		Handlebar = true, StemClamp = true, StemCollar = true, ForkL = true, ForkR = true, ForkCollarL = true, ForkCollarR = true,
+		SwingArm = true, RearRack = true, FrontAxle = true, RearAxle = true, FenderBolt = true, LightRim = true, TailLightRim = true,
+		Bolt1 = true, Bolt2 = true, Bolt3 = true,
+		-- Bolt X
+		ForkCrown = true, ForkLowerL = true, ForkLowerR = true, HeadCollar = true, SteerTube = true, RearShock = true, RearShockL = true,
+		SwingArmL = true, LightRim2 = true, LightBar = true,
+		-- kick scooters (Courier)
+		Basket = true, BasketMount = true, PhoneMount = true,
+	}
+	-- rims, and Bolt X's springs in the same accent colour
+	local RIMS = { TyreFrontHub = true, TyreRearHub = true, SpringL = true, SpringR = true, RearSpring = true, RearSpringL = true }
+	local RUBBER = { TyreFront = true, TyreRear = true, Grip = true, DeckGrip = true }
+	local FIXED = {
+		Screen = Color3.fromRGB(30, 33, 42), Light = Color3.fromRGB(255, 245, 200), Light2 = Color3.fromRGB(255, 245, 200), TailLight = Color3.fromRGB(230, 50, 50),
+		Battery = Color3.fromRGB(60, 63, 72), BatteryCap = Color3.fromRGB(240, 190, 60),
+		DeckLight = Color3.fromRGB(255, 245, 200), Phone = Color3.fromRGB(40, 42, 50), PhoneScreen = Color3.fromRGB(70, 140, 245),
+	}
+	local PAINT = {}
+	for _, p in Config.Paints do PAINT[p.Name] = p end
+	-- Scooter models come straight from Blender: parts may sit in sub-models, be
+	-- unanchored, face either way or carry export names ("Grip.001"). Tidy all of
+	-- that when a scooter spawns, so a new version of a model can be dropped into
+	-- ReplicatedStorage.Scooters without touching the code.
+	prepScooter = function(m)
+		for _, d in m:GetDescendants() do
+			if d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.Name = (d.Name:gsub("%.%d+$", ""))
+				if d.Parent ~= m then d.Parent = m end
+			elseif d:IsA("JointInstance") or d:IsA("WeldConstraint") then
+				d:Destroy()
+			end
 		end
-	end
-	for _, d in m:GetChildren() do
-		if d:IsA("Model") and #d:GetChildren() == 0 then d:Destroy() end
-	end
-	-- the game expects the front wheel on +X (bench views, test ride)
-	local front, rear = m:FindFirstChild("TyreFront"), m:FindFirstChild("TyreRear")
-	if front and rear then
-		local pivot = m:GetPivot()
-		if pivot:PointToObjectSpace(front.Position).X < pivot:PointToObjectSpace(rear.Position).X then
-			m.PrimaryPart = nil
-			m.WorldPivot = pivot * CFrame.Angles(0, math.pi, 0)
+		for _, d in m:GetChildren() do
+			if d:IsA("Model") and #d:GetChildren() == 0 then d:Destroy() end
 		end
-		if not m:GetAttribute("WheelD") then
-			m:SetAttribute("WheelD", math.max(front.Size.X, front.Size.Y, front.Size.Z))
-		end
-	end
-end
-
-local function paint(m, job)
-	local look = PAINT[job.Paint] or Config.Paints[1]
-	for _, p in m:GetChildren() do
-		if p:IsA("BasePart") then
-			local n = p.Name
-			if BODY[n] then
-				p.Color = look.Body
-				p.Material = look.Material or Enum.Material.SmoothPlastic
-			elseif n == "Seat" then
-				p.Color = look.Seat
-			elseif TRIM[n] or RIMS[n] then
-				p.Color = RIMS[n] and look.Rims or look.Trim
-				p.Material = look.Glow and Enum.Material.Neon or (look.Material or Enum.Material.SmoothPlastic)
-			elseif RUBBER[n] then
-				p.Color = Config.Rubber
-			elseif FIXED[n] then
-				p.Color = FIXED[n]
+		-- the game expects the front wheel on +X (bench views, test ride)
+		local front, rear = m:FindFirstChild("TyreFront"), m:FindFirstChild("TyreRear")
+		if front and rear then
+			local pivot = m:GetPivot()
+			if pivot:PointToObjectSpace(front.Position).X < pivot:PointToObjectSpace(rear.Position).X then
+				m.PrimaryPart = nil
+				m.WorldPivot = pivot * CFrame.Angles(0, math.pi, 0)
+			end
+			if not m:GetAttribute("WheelD") then
+				m:SetAttribute("WheelD", math.max(front.Size.X, front.Size.Y, front.Size.Z))
 			end
 		end
 	end
-	-- rarer jobs sparkle so you spot them on the belt
-	local r = RARITY[job.Rarity]
-	if r and r.Index >= 3 then
-		local e = Instance.new("ParticleEmitter")
-		e.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-		e.Color = ColorSequence.new(r.Color)
-		e.Size = NumberSequence.new(0.3, 0)
-		e.Lifetime = NumberRange.new(0.5, 1)
-		e.Speed = NumberRange.new(0.5, 1.5)
-		e.SpreadAngle = Vector2.new(180, 180)
-		e.Rate = r.Index * 2
-		e.LightEmission = 1
-		e.Parent = m.Deck
+
+	paint = function(m, job)
+		local look = PAINT[job.Paint] or Config.Paints[1]
+		for _, p in m:GetChildren() do
+			if p:IsA("BasePart") then
+				local n = p.Name
+				if BODY[n] then
+					p.Color = look.Body
+					p.Material = look.Material or Enum.Material.SmoothPlastic
+				elseif n == "Seat" then
+					p.Color = look.Seat
+				elseif TRIM[n] or RIMS[n] then
+					p.Color = RIMS[n] and look.Rims or look.Trim
+					p.Material = look.Glow and Enum.Material.Neon or (look.Material or Enum.Material.SmoothPlastic)
+				elseif RUBBER[n] then
+					p.Color = Config.Rubber
+				elseif FIXED[n] then
+					p.Color = FIXED[n]
+				end
+			end
+		end
+		-- rarer jobs sparkle so you spot them on the belt
+		local r = RARITY[job.Rarity]
+		if r and r.Index >= 3 then
+			local e = Instance.new("ParticleEmitter")
+			e.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+			e.Color = ColorSequence.new(r.Color)
+			e.Size = NumberSequence.new(0.3, 0)
+			e.Lifetime = NumberRange.new(0.5, 1)
+			e.Speed = NumberRange.new(0.5, 1.5)
+			e.SpreadAngle = Vector2.new(180, 180)
+			e.Rate = r.Index * 2
+			e.LightEmission = 1
+			e.Parent = m.Deck
+		end
 	end
 end
 
@@ -5396,21 +5395,24 @@ end)
 end
 
 -- Cash counts up (or down) smoothly and the pill pops when you earn.
-local cashShown, cashTarget = 0, 0
-RunService.RenderStepped:Connect(function(dt)
-	if cashShown == cashTarget then return end
-	local diff = cashTarget - cashShown
-	local step = math.max(1, math.abs(diff) * math.min(1, dt * 5))
-	cashShown = diff > 0 and math.min(cashTarget, cashShown + step) or math.max(cashTarget, cashShown - step)
-	ui.cash.Text = ui.style.money(cashShown)
-end)
+local refreshCash
+do
+	local cashShown, cashTarget = 0, 0
+	RunService.RenderStepped:Connect(function(dt)
+		if cashShown == cashTarget then return end
+		local diff = cashTarget - cashShown
+		local step = math.max(1, math.abs(diff) * math.min(1, dt * 5))
+		cashShown = diff > 0 and math.min(cashTarget, cashShown + step) or math.max(cashTarget, cashShown - step)
+		ui.cash.Text = ui.style.money(cashShown)
+	end)
 
-local function refreshCash()
-	local ls = player:FindFirstChild("leaderstats")
-	local value = ls and ls.Cash.Value or 0
-	if value > cashTarget then popScale(gui.Cash, 0.85) end
-	cashTarget = value
-	if ui.shop.Visible then refreshShop() end
+	refreshCash = function()
+		local ls = player:FindFirstChild("leaderstats")
+		local value = ls and ls.Cash.Value or 0
+		if value > cashTarget then popScale(gui.Cash, 0.85) end
+		cashTarget = value
+		if ui.shop.Visible then refreshShop() end
+	end
 end
 
 ---------------------------------------------------------------- start
