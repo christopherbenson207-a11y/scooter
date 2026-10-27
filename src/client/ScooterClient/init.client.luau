@@ -106,7 +106,7 @@ local ui = {
 	daycard = require(script.DayCard), -- the day summary once the last customer is served
 	guide = require(script.Guide), -- what to do next: a gold glow and a trail on the floor
 	store = require(script.Store), -- the Robux store (the menu ball, the + on the cash)
-	moments = require(script.Moments), -- Hang on!, cheers while you work, lunch rush
+	moments = require(script.Moments), -- Hang on!, cheers while you work
 	bubbles = require(script.Bubbles), -- customer bubbles: fix icons, patience bar, faces (no words)
 	tycoon = require(script.Tycoon), -- night: price boards over every machine, ghosts of the ones to buy
 }
@@ -2694,8 +2694,10 @@ do
 				m:ScaleTo(math.max(0.05, 1 - a * a))
 			end, Enum.EasingStyle.Back, Enum.EasingDirection.In)
 			puff(from.Position + Vector3.new(0, 2.5, 0), nil, 12)
-			m:Destroy()
-			origs[m] = nil
+			if not onGone then -- (with onGone the scooter goes on to its owner: handOver)
+				m:Destroy()
+				origs[m] = nil
+			end
 		end
 		if BOOTH.busy == m then BOOTH.busy = nil end
 		if onGone then onGone() end
@@ -3725,17 +3727,13 @@ end
 
 -- A fix's pay is quick now (owner, 24 Oct: "every fix = a star screen that takes time"): one line and the
 -- coins fly from the scooter to your cash. The stars come all together on the day card at night.
+-- (plan/13: the pay itself is left at the window by the owner, see handOver: this is just the verdict)
 local function quickPay(r)
 	if not r then return end
 	local title = r.WrongPaint and "WRONG COLOUR" or RESULT_TITLES[r.Stars]
-	popText(("%s  +$%s"):format(title, ui.style.money(r.Total)), 0.75, 1.4, r.Stars >= 4 and GREEN or nil)
+	popText(title .. "  " .. string.rep("★", r.Stars), 0.75, 1.4, r.Stars >= 4 and GREEN or nil)
 	sfx(SFX.Done, 0.8, r.Stars >= 4 and 1.3 or 1)
 	if r.Stars >= 4 then shake(0.25, 0.2) elseif r.Stars <= 2 then shake(0.15, 0.12) end
-	local m = active and active.model
-	if m and m.Parent then
-		local p = camera:WorldToViewportPoint(m:GetPivot().Position)
-		coinsTo(Vector2.new(p.X, p.Y), math.clamp(math.floor(r.Total / 15), 4, 14))
-	end
 end
 
 -- Fever parallel bench (plan/12): sessions round-robin at fix boundaries. Park a half-done
@@ -4274,6 +4272,7 @@ do
 	-- that when a scooter spawns, so a new version of a model can be dropped into
 	-- ReplicatedStorage.Scooters without touching the code.
 	prepScooter = function(m)
+		if m:GetAttribute("BaseScale") == nil then m:SetAttribute("BaseScale", m:GetScale()) end
 		for _, d in m:GetDescendants() do
 			if d:IsA("BasePart") then
 				d.Anchored = true
@@ -4665,36 +4664,214 @@ function pickJob(id)
 	runSessions(sess)
 end
 
--- Hand the fixed scooter back: it lifts off the bench and goes out to its owner.
+-- The serve moment (plan/13, Cooking Fever's counter): the fixed scooter pops off the bench and out beside
+-- its owner at the window, they cheer with hearts, leave the pay on the window counter in front of them
+-- and ride off. Tap the cash to collect it (the tag is a GUI button, so it never counts as a minigame
+-- tap); taps in quick succession jingle higher. Cash nobody taps is collected by itself after
+-- Config.CashPile.AutoCollect (the server banks it after BankAfter, and when you leave), so none is lost.
+-- A modelled ReplicatedStorage.CashPile is used if there is one; otherwise a simple stack is built.
+local handOver
+do
+	local COUNTER_Y, COUNTER_Z = 3.45, -20.6 -- the outside half of the window counter (plot space)
+	local piles = {} -- the cash waiting on the counter: { model, tag, x, jobId, taken }
+	local lastCollect, streak, hints = 0, 0, 0
+
+	-- little hearts float up from a happy customer (more for more stars)
+	local function hearts(c, n)
+		local head = c.model:FindFirstChild("Head")
+		if not head then return end
+		for i = 1, math.clamp(n, 1, 5) do
+			task.delay(i * 0.12, function()
+				if not head.Parent then return end
+				local bb = Instance.new("BillboardGui")
+				bb.Size = UDim2.fromOffset(36, 36)
+				bb.StudsOffsetWorldSpace = Vector3.new((math.random() - 0.5) * 1.6, 1.3, 0)
+				bb.AlwaysOnTop = true
+				bb.LightInfluence = 0
+				local t = Instance.new("TextLabel")
+				t.BackgroundTransparency = 1
+				t.Size = UDim2.fromScale(1, 1)
+				t.Text = "♥"
+				t.TextScaled = true
+				t.TextColor3 = Color3.fromRGB(255, 90, 130)
+				t.FontFace = ui.style.Font.Chunky
+				local st = Instance.new("UIStroke", t)
+				st.Color = Color3.new(1, 1, 1)
+				st.Thickness = 2
+				t.Parent = bb
+				bb.Parent = head
+				local info = TweenInfo.new(1.1, Enum.EasingStyle.Quad)
+				TweenService:Create(bb, info, { StudsOffsetWorldSpace = bb.StudsOffsetWorldSpace + Vector3.new(0, 2.2, 0) }):Play()
+				TweenService:Create(t, info, { TextTransparency = 1 }):Play()
+				TweenService:Create(st, info, { Transparency = 1 }):Play()
+				task.delay(1.2, function() bb:Destroy() end)
+			end)
+		end
+	end
+
+	local function collect(pile, auto)
+		if pile.taken then return end
+		pile.taken = true
+		local i = table.find(piles, pile)
+		if i then table.remove(piles, i) end
+		local at = pile.model:GetPivot().Position
+		local sp = camera:WorldToViewportPoint(at)
+		pile.tag:Destroy()
+		pile.model:Destroy()
+		sparkle(at)
+		local ok, got = pcall(function() return Remotes.CollectCash:InvokeServer(pile.jobId, auto) end)
+		got = ok and tonumber(got) or 0
+		if got <= 0 then return end -- (banked already)
+		local now = os.clock()
+		streak = now - lastCollect < 2.5 and streak + 1 or 1
+		lastCollect = now
+		coinsTo(Vector2.new(sp.X, sp.Y), math.clamp(math.floor(got / 15), 5, 16))
+		sfx(SFX.Done, 0.7, 1.1 + math.min(streak, 6) * 0.08)
+		popText("+$" .. ui.style.money(got), 0.6 + math.min(streak, 4) * 0.04, 0.9, GREEN)
+	end
+
+	local function buildPile()
+		local template = RS:FindFirstChild("CashPile")
+		if template then return template:Clone() end
+		local pile = Instance.new("Model")
+		pile.Name = "CashPile"
+		local function piece(size, color, material, cf)
+			local p = Instance.new("Part")
+			p.Size = size
+			p.Color = color
+			p.Material = material
+			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
+			p.CFrame = cf
+			p.Parent = pile
+			return p
+		end
+		for i = 1, 3 do
+			local bill = piece(Vector3.new(1.1, 0.09, 0.55), i % 2 == 1 and Color3.fromRGB(96, 196, 104) or Color3.fromRGB(70, 160, 84),
+				Enum.Material.SmoothPlastic, CFrame.new(0, 0.05 + (i - 1) * 0.09, 0) * CFrame.Angles(0, math.rad(math.random(-14, 14)), 0))
+			if i == 1 then pile.PrimaryPart = bill end
+		end
+		-- a coin on top (a cylinder's axis is its X: turned upright it lies flat)
+		piece(Vector3.new(0.08, 0.42, 0.42), Color3.fromRGB(255, 200, 60), Enum.Material.Metal, CFrame.new(0.22, 0.36, 0) * CFrame.Angles(0, 0, math.rad(90)))
+		return pile
+	end
+
+	-- the pay on the counter in front of x (plot space), with a tag you tap
+	local function dropCash(x, amount, jobId)
+		x = math.clamp(x, -12, 12)
+		-- next to any cash already lying there
+		local taken = true
+		while taken do
+			taken = false
+			for _, p in piles do
+				if math.abs(p.x - x) < 1.2 then
+					x = x + 1.3 > 12 and x - 1.3 or x + 1.3
+					taken = true
+				end
+			end
+		end
+		local model = buildPile()
+		model:PivotTo(Config.P.PF * CFrame.new(x, COUNTER_Y, COUNTER_Z))
+		model.Parent = workspace
+		puff(model:GetPivot().Position + Vector3.new(0, 0.5, 0), Color3.fromRGB(150, 230, 150), 6)
+		local tag = Instance.new("BillboardGui")
+		tag.Name = "CashTag"
+		tag.Adornee = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+		tag.Size = UDim2.fromOffset(112, 46)
+		tag.StudsOffsetWorldSpace = Vector3.new(0, 1.3, 0)
+		tag.AlwaysOnTop = true
+		tag.LightInfluence = 0
+		tag.Active = true
+		tag.ResetOnSpawn = false
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.fromScale(1, 1)
+		btn.BackgroundColor3 = ui.style.Color.Cash
+		btn.Text = "$" .. ui.style.money(amount)
+		btn.FontFace = ui.style.Font.Chunky
+		btn.TextScaled = true
+		btn.TextColor3 = Color3.new(1, 1, 1)
+		Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 12)
+		local st = Instance.new("UIStroke", btn)
+		st.Color = ui.style.Color.Ink
+		st.Thickness = 3
+		st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		local pad = Instance.new("UIPadding", btn)
+		pad.PaddingTop, pad.PaddingBottom = UDim.new(0, 6), UDim.new(0, 6)
+		btn.Parent = tag
+		tag.Parent = player.PlayerGui
+		popScale(btn, 0.4, 0.3)
+		-- a gentle bob so it catches the eye
+		TweenService:Create(tag, TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{ StudsOffsetWorldSpace = Vector3.new(0, 1.6, 0) }):Play()
+		local pile = { model = model, tag = tag, x = x, jobId = jobId }
+		table.insert(piles, pile)
+		btn.Activated:Connect(function() task.spawn(collect, pile) end)
+		task.delay(Config.CashPile and Config.CashPile.AutoCollect or 25, function() collect(pile, true) end)
+		if hints < 2 then
+			hints += 1
+			task.delay(0.8, function()
+				if not pile.taken then popText("Tap the cash to collect it!", 0.55, 1.8, ui.style.Color.Gold) end
+			end)
+		end
+	end
+
+	-- done = the finished session; lifted = it already left its spot (the paint booth lifts it itself)
+	handOver = function(done, m, c, lifted)
+		local r = done.result
+		local base = m and m:GetAttribute("BaseScale") or 1
+		if m and m.Parent and not lifted then
+			-- off the bench: up, small, gone in a puff
+			local from = m:GetPivot()
+			sfx(SFX.Done, 0.5, 1.3)
+			animate(0.45, function(a)
+				m:PivotTo(from + Vector3.new(0, a * 2.5, 0))
+				m:ScaleTo(base * math.max(0.05, 1 - a * a))
+			end, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+			puff(from.Position + Vector3.new(0, 2.5, 0), nil, 12)
+		end
+		local owner = c and c.model and c.model.Parent and c or nil
+		if owner then
+			-- they may still be walking up to the window
+			local t0 = os.clock()
+			while owner.walking and os.clock() - t0 < 8 do task.wait() end
+		end
+		if owner and m and m.Parent then
+			-- and out beside its owner, wheels on the ground
+			m:ScaleTo(base)
+			local stop = SCOOTER_FX.escort(owner, m)
+			RunService.RenderStepped:Wait()
+			stop()
+			puff(m:GetPivot().Position + Vector3.new(0, 1, 0), nil, 10)
+			sfx(SFX.Done, 0.6, 1.5)
+		elseif m and m.Parent then
+			m:Destroy()
+			origs[m] = nil
+			m = nil
+		end
+		local happy = not done.dropped and not done.wrongPaint
+		if owner and happy then hearts(owner, r and r.Stars or 3) end
+		if r and (r.Total or 0) > 0 then
+			-- your own first scooter has no owner at the window: its pay lands where the next one will stand
+			local x = owner and Config.P.toLocal(owner.model:GetPivot().Position).X or Config.P.toLocal(WAIT_SPOTS[1].Position).X
+			dropCash(x, r.Total, done.job.Id)
+		end
+		if owner then
+			customerLeaves(owner, done.dropped and "😕" or done.wrongPaint and "😤" or Config.Fun.thanks(done), done.wrongPaint, m)
+		end
+	end
+end
+
+-- Hand the fixed scooter back to its owner (handOver).
 finishJob = function()
 	local done = active
 	active = nil
 	if not done then return end
 	local m, c = done.model, done.customer
 	if done.painted and m and m.Parent then
-		task.spawn(BOOTH.dry, done, function()
-			if c and c.model and c.model.Parent then
-				if done.wrongPaint then customerLeaves(c, "😤", true) else customerLeaves(c, Config.Fun.thanks(done)) end
-			end
-		end)
+		-- it dries in the booth first, then goes out to its owner
+		task.spawn(BOOTH.dry, done, function() handOver(done, m, c, true) end)
 		return
 	end
-	if m and m.Parent then
-		task.spawn(function()
-			local from = m:GetPivot()
-			sfx(SFX.Done, 0.5, 1.3)
-			animate(0.45, function(a)
-				m:PivotTo(from + Vector3.new(0, a * 2.5, 0))
-				m:ScaleTo(math.max(0.05, 1 - a * a))
-			end, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-			puff(from.Position + Vector3.new(0, 2.5, 0), nil, 12)
-			m:Destroy()
-			origs[m] = nil
-		end)
-	end
-	if c and c.model and c.model.Parent then
-		task.spawn(customerLeaves, c, done.dropped and "😕" or Config.Fun.thanks(done))
-	end
+	task.spawn(handOver, done, m, c, false)
 	-- a part a waiting customer needs has run out: the restock card now, between jobs
 	task.delay(0.6, function()
 		if state == "idle" then checkStock() end

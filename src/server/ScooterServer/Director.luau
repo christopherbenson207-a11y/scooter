@@ -1,7 +1,7 @@
 -- The job director (plan/11 section 3). Instead of rolling every customer from scratch, each player's day is
 -- planned from what the server knows about them: what they're good and bad at, what they haven't seen lately,
 -- what they just bought, how the day is going. A day deals Warm-up -> Show-off -> Core (one Practice in it)
--- -> Big at the lunch rush -> Cool-down at the end; the first 3 days are scripted. Inside a slot it's still a
+-- -> Big in the middle of the day -> Cool-down at the end; the first 3 days are scripted. Inside a slot it's still a
 -- little random. All the numbers are in ScooterConfig.Director.
 --
 -- Director.init(env)            env.unlocked(player) -> fix names you can do now, env.maxFixes(player) -> n
@@ -285,8 +285,15 @@ local function behind(player, s)
 	return (s.cashToday or 0) < Config.nightCash(dayOf(player)) * through * D.Behind
 end
 
+-- the middle stretch of the day (35-65% through): where the Big jobs go (it used to be the lunch rush)
+local function midday(ends)
+	if workspace:GetAttribute("Phase") ~= "Day" then return false end
+	local through = 1 - (ends - workspace:GetServerTimeNow()) / Config.DaySeconds
+	return through >= 0.35 and through <= 0.65
+end
+
 ---------------------------------------------------------------- the next customer
--- opts: rush (lunch rush now), queue + cap (the yard), minRarity (the "call a rare customer" product).
+-- opts: queue + cap (the yard), minRarity (the "call a rare customer" product).
 -- Returns { Chosen = { [fix] = true }, Story, Scooter, Rarity, Slot, Patience, Pay, NoMood, Mood, NewScooter }
 -- or nil (makeJob then rolls the old way).
 function Director.next(player, opts)
@@ -351,7 +358,7 @@ function Director.next(player, opts)
 		local late = ends and ends - workspace:GetServerTimeNow() < D.CoolAt
 		if late then
 			slot = "Cool"
-		elseif opts.rush and s.big < D.BigPerDay and max >= 2 then
+		elseif s.big < D.BigPerDay and max >= 2 and ends and midday(ends) then
 			slot = "Big"
 		end
 		if slot == "Practice" and (s.practiced or s.dealtToday <= 1) then slot = "Core" end

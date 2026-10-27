@@ -302,12 +302,15 @@ C.Personalities = {
 C.PatiencePerFix = 20 -- (old rule, kept for reference; patience now grows with the job's par)
 C.PatiencePerPar = 1.8 -- + 1.8 s of patience for every second of par, so a big job doesn't make them cross
 C.PatienceByDay = { 1.6, 1.3, 1.1, 1.0 }
--- "Hang on!" (plan/06): shows when a waiting customer is down to Below of their patience; every waiting customer
--- gets Back of their patience back, once each, then the button rests Cooldown seconds.
-C.HangOn = { Below = 0.3, Back = 0.25, Cooldown = 45 }
--- Lunch rush (24 Oct): once a day, somewhere between From and To of the day, for Seconds, customers come Rate
--- times as often and pay Pay times more. Every garage gets busy at once.
-C.LunchRush = { From = 0.35, To = 0.65, Seconds = 60, Rate = 2.5, Pay = 1.25 }
+-- Cash on the window counter (plan/13): the client collects it by itself after AutoCollect seconds if you
+-- haven't tapped it; the server banks it after BankAfter (and when you leave) whatever happens.
+C.CashPile = { AutoCollect = 25, BankAfter = 60 }
+-- Studio playtests print one [Tuning] line per player at dusk (customers, waits, walk-outs, time vs par,
+-- stars, cash vs the day goal, chains, cash tapped vs auto-collected): the numbers to tune from.
+C.TuningLog = true
+-- Welcome (plan/13): after you join, this many customers come even at night, and a returning player's first
+-- one sets off the moment they join, so nobody starts a session standing at an empty bench.
+C.WelcomeCustomers = 2
 -- They walk out after this many times their patience (1.0 = the moment it's gone) and leave a bad review.
 -- Stars still only count from when you pick the job; a picked job's clock keeps running even while parked.
 C.LeaveAfter = 1.0 -- Fever rule: when their patience is gone, they take their scooter and go (plan/12)
@@ -372,7 +375,7 @@ C.Moods = {
 C.FreshJobs = 3 -- after you unlock a job type, the next this-many jobs include it
 
 -- The job director (plan/11 section 3, ScooterServer.Director): each player's day is planned from what the
--- server knows about them. A day deals Warm-up -> Show-off -> Core (with one Practice) -> Big at the lunch rush
+-- server knows about them. A day deals Warm-up -> Show-off -> Core (with one Practice) -> Big in the middle of the day
 -- -> Cool-down at the end of the day. Inside a slot it's still a little random.
 C.Director = {
 	Deck = { Base = 8, PerBelt = 2, GoodRating = 4, PerGoodRating = 2, Max = 14 }, -- slots planned per day
@@ -386,7 +389,7 @@ C.Director = {
 		TyreRack = { "Worn" }, WireKit = { "Light" }, Bucket = { "Rust" }, WashBay = { "Mud" },
 		PaintBooth = { "Paint" }, NitroKit = { "Nitro" },
 	},
-	BigPerDay = 2, -- Big jobs (the most fixes today allows) during the lunch rush
+	BigPerDay = 2, -- Big jobs (the most fixes today allows) in the middle of the day (35-65% through)
 	CoolAt = 45, -- seconds of daylight left: from here on jobs are short and easy
 	ClassMix = { 0.5, 0.35, 0.15 }, -- your newest scooter class, the one below, all older ones
 	Pity = { 12, 40, 120 }, -- jobs without a Rare / Epic / Legendary before one is guaranteed

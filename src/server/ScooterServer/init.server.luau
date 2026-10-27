@@ -62,11 +62,11 @@ local Restock = remote("RemoteFunction", "Restock") -- out of stock: the 10 R$ r
 local GiveUpStock = remote("RemoteFunction", "GiveUpStock") -- the card ran out: the customers who needed it leave
 local GetDay = remote("RemoteFunction", "GetDay") -- today's numbers for the day summary card
 local StoreBuy = remote("RemoteFunction", "StoreBuy") -- the Robux store (Config.Store)
-local HangOn = remote("RemoteFunction", "HangOn") -- "Hang on!": waiting customers get some patience back
 local StepDone = remote("RemoteFunction", "StepDone") -- Fever loop: each finished fix pays on the spot
 local SwitchCurrent = remote("RemoteFunction", "SwitchCurrent") -- parallel bench: which job is on the bench right now
 local Offer = remote("RemoteEvent", "Offer") -- context offers (plan/12): short, need-timed popups
 local OfferBuy = remote("RemoteFunction", "OfferBuy")
+local CollectCash = remote("RemoteFunction", "CollectCash") -- a finished job's pay, left at the window: tap to collect
 remotes.Parent = RS
 
 local data = {} -- [player] = { queue, actives, current, lastRepair, nextId, lastKey, fresh, freshLeft, night, hungry, tour, today }
@@ -358,7 +358,7 @@ local function pickPaintColour(player)
 	return rack[math.random(#rack)]
 end
 
--- opts (from the spawner): rush, queue, cap; the director plans the job from them (nil plan = the old roll)
+-- opts (from the spawner): queue, cap; the director plans the job from them (nil plan = the old roll)
 local function makeJob(player, first, minRarity, opts)
 	local d = data[player]
 	d.nextId += 1
@@ -506,7 +506,11 @@ end
 
 -- Today's numbers, for the day summary card at night (reset at dawn).
 function newDay()
-	return { Jobs = 0, Stars = 0, Cash = 0, Perfect = 0, Lost = 0, Best = nil }
+	return {
+		Jobs = 0, Stars = 0, Cash = 0, Perfect = 0, Lost = 0, Best = nil,
+		-- for the tuning log (Config.TuningLog)
+		Arrived = 0, Picked = 0, Waited = 0, Patience = 0, ParRatio = 0, MaxChain = 0, Tapped = 0, AutoBanked = 0,
+	}
 end
 
 local function onPlayerAdded(player)
@@ -592,19 +596,45 @@ local function onPlayerAdded(player)
 
 	-- nobody turns up until your own scooter is fixed; after that customers choose garages (see the
 	-- customers section at the end). Day and night come from the shared clock.
-	local d = { queue = {}, actives = {}, nextId = 0, freshLeft = 0, today = newDay() }
+	local d = { queue = {}, actives = {}, nextId = 0, freshLeft = 0, today = newDay(), welcome = Config.WelcomeCustomers or 2 }
 	if testAll and Config.StudioTour then d.tour = table.clone(Config.StudioTour) end
 	data[player] = d
 	player:SetAttribute("ShopOpen", Clock.phase == "Day")
 	player:SetAttribute("Night", false)
 	if (player:GetAttribute("Fixed") or 0) == 0 then
 		table.insert(d.queue, makeJob(player, true))
+	else
+		d.hungry = os.clock() -- back again: someone's on their way the moment you join, day or night
 	end
 end
 Players.PlayerAdded:Connect(onPlayerAdded)
 for _, player in Players:GetPlayers() do task.spawn(onPlayerAdded, player) end
 
+-- Pay left at the window (FinishJob) goes into the cash when it's tapped (CollectCash), or by itself after
+-- Config.CashPile.BankAfter, when you leave and when the server shuts down: it's never lost.
+-- jobId = that one; nil = all of it. Returns how much went in.
+local function bankCash(player, jobId, auto)
+	local d = data[player]
+	local cash = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Cash")
+	if not (d and d.unpaid and cash) then return 0 end
+	local sum = 0
+	for id, u in d.unpaid do
+		if jobId == nil or id == jobId then
+			sum += u.amount
+			d.unpaid[id] = nil
+		end
+	end
+	cash.Value += sum
+	if auto then d.today.AutoBanked += sum else d.today.Tapped += sum end
+	return sum
+end
+CollectCash.OnServerInvoke = function(player, jobId, auto)
+	if type(jobId) ~= "number" then return 0 end
+	return bankCash(player, jobId, auto == true) -- auto = the client collected it by itself (nobody tapped)
+end
+
 Players.PlayerRemoving:Connect(function(player)
+	bankCash(player, nil, true) -- before the last save
 	forgetCustomers(player)
 	data[player] = nil
 	updateRatingSign(player)
@@ -625,6 +655,7 @@ task.spawn(function()
 end)
 game:BindToClose(function()
 	for _, player in Players:GetPlayers() do
+		bankCash(player, nil, true)
 		task.spawn(writeSave, player, true)
 	end
 	task.wait() -- let the saves start
@@ -654,6 +685,12 @@ task.spawn(function()
 		local now = os.clock()
 		for player, d in data do
 			local changed = false
+			-- cash nobody tapped goes in by itself after a while (the client collects sooner, with the coins)
+			if d.unpaid then
+				for id, u in d.unpaid do
+					if now - u.at > (Config.CashPile and Config.CashPile.BankAfter or 60) then bankCash(player, id, true) end
+				end
+			end
 			-- a rescued customer who wasn't rescued in time goes home angry after all
 			if d.rescuing then
 				if now >= (d.rescueUntil or 0) then
@@ -700,30 +737,6 @@ task.spawn(function()
 	end
 end)
 
--- "Hang on!" (Config.HangOn): everyone waiting gets a quarter of their patience back, once each.
-HangOn.OnServerInvoke = function(player)
-	local d = data[player]
-	if not d then return false end
-	local now = os.clock()
-	if d.hangOnAt and now - d.hangOnAt < Config.HangOn.Cooldown then return false end
-	local anyLow, n = false, 0
-	for _, job in d.queue do
-		if job.Patience and job.queuedAt and now - job.queuedAt > job.Patience * (1 - Config.HangOn.Below) then anyLow = true end
-	end
-	if not anyLow then return false end
-	for _, job in d.queue do
-		if job.Patience and job.queuedAt and not job.HungOn then
-			job.HungOn = true
-			job.queuedAt = math.min(now, job.queuedAt + job.Patience * Config.HangOn.Back)
-			n += 1
-		end
-	end
-	if n == 0 then return false end
-	d.hangOnAt = now
-	QueueChanged:FireClient(player, snapshot(d))
-	return true
-end
-
 GetQueue.OnServerInvoke = function(player)
 	local d = data[player]
 	return d and snapshot(d) or {}
@@ -755,6 +768,12 @@ PickJob.OnServerInvoke = function(player, id)
 			d.actives[id] = job
 			d.current = id
 			job.started = os.clock()
+			if not job.First and job.queuedAt then
+				local t = d.today
+				t.Picked += 1
+				t.Waited += math.max(0, job.started - job.queuedAt)
+				t.Patience += job.Patience or 0
+			end
 			return job, snapshot(d)
 		end
 	end
@@ -798,6 +817,7 @@ StepDone.OnServerInvoke = function(player, name)
 	local bonus = math.floor(advance * math.min((d.chain - 1) * C.Step, C.Max))
 	player.leaderstats.Cash.Value += advance + bonus
 	d.today.Cash += advance + bonus
+	d.today.MaxChain = math.max(d.today.MaxChain, d.chain)
 	return advance, bonus, d.chain
 end
 
@@ -886,7 +906,9 @@ FinishJob.OnServerInvoke = function(player, jobId, paintQuality, skill)
 	local total = repair + speed + streakBonus + tip + skillBonus + speedTip
 	-- the 2x Cash pass doubles the job's pay (not tips: plan/10 keeps a cash player within 2x)
 	if player:GetAttribute("Pass_Cash2x") then total += repair + speed + streakBonus + skillBonus end
-	player.leaderstats.Cash.Value += total
+	-- the owner leaves it at the window (CF's coins on the counter): it's yours when you tap it (CollectCash)
+	d.unpaid = d.unpaid or {}
+	d.unpaid[job.Id] = { amount = total, at = os.clock() }
 	player:SetAttribute("Fixed", (player:GetAttribute("Fixed") or 0) + 1)
 	Director.record(player, job, stars, recordTime, total)
 	-- the day card's numbers (your own first scooter doesn't count)
@@ -894,6 +916,7 @@ FinishJob.OnServerInvoke = function(player, jobId, paintQuality, skill)
 		local t = d.today
 		t.Jobs += 1
 		t.Stars += stars
+		t.ParRatio += elapsed / math.max(job.Par, 1)
 		t.Cash += total
 		if stars == 5 then t.Perfect += 1 end
 		if not t.Best or total > t.Best.Total then t.Best = { Total = total, Stars = stars, Scooter = job.Scooter, Rarity = job.Rarity } end
@@ -1282,6 +1305,19 @@ local function applyPhase(name)
 			-- plan/12: dusk opens upgrades for everyone — no trash chore gate, and waiting
 			-- customers can no longer hold anyone's upgrades hostage
 			d.night = true
+			-- the day in numbers, for tuning (Studio playtests only): paste these lines to tune from
+			if Config.TuningLog and RunService:IsStudio() then
+				local t, dayN = d.today, player:GetAttribute("Day") or 1
+				local base = Config.nightCash(dayN)
+				local G = Config.DayGoals or { Low = 0.8, Med = 1.1, High = 1.45 }
+				print(("[Tuning] %s day %d | customers %d, served %d, walked out %d | waited %.0fs of %.0fs patience (avg) | jobs %.2fx par, %.1f stars (avg) | earned $%d, goal $%d/$%d/$%d | best chain %d | cash tapped $%d, auto $%d | bench T%d, belt T%d"):format(
+					player.Name, dayN, t.Arrived, t.Jobs, t.Lost,
+					t.Picked > 0 and t.Waited / t.Picked or 0, t.Picked > 0 and t.Patience / t.Picked or 0,
+					t.Jobs > 0 and t.ParRatio / t.Jobs or 0, t.Jobs > 0 and t.Stars / t.Jobs or 0,
+					math.floor(t.Cash), math.floor(base * G.Low), math.floor(base * G.Med), math.floor(base * G.High), t.MaxChain,
+					math.floor(t.Tapped), math.floor(t.AutoBanked),
+					Config.tierOf(player:GetAttribute("Bench") or 1), Config.tierOf(player:GetAttribute("Belt") or 1)))
+			end
 			player:SetAttribute("Night", true)
 		end
 	end
@@ -1320,9 +1356,11 @@ GetCrowd.OnServerInvoke = function()
 	return list
 end
 
-local function candidates()
+-- welcomeOnly (at night): just the garages still owed a welcome customer (Config.WelcomeCustomers)
+local function candidates(welcomeOnly)
 	local list = {}
 	for player, d in data do
+		if welcomeOnly and (d.welcome or 0) <= 0 then continue end
 		if player.Parent and Plots.indexOf(player) and (player:GetAttribute("Fixed") or 0) > 0 then
 			local cap = levelValue(player, "Belt", "Queue") or 2
 			-- parked jobs sit on the belt too: the belt owns the Queue slots plus the bench (plan/12)
@@ -1339,19 +1377,14 @@ local function candidates()
 	return list
 end
 
-local rushAt, rushUntil = nil, 0 -- lunch rush (below)
-
 local function spawnCustomer(player, minRarity)
 	local d = data[player]
 	local arrive = Plots.arrivePosition(player)
 	if not (d and arrive) then return end
 	local job = makeJob(player, false, minRarity, {
-		rush = os.clock() < rushUntil, queue = d.queue, cap = levelValue(player, "Belt", "Queue") or 2,
+		queue = d.queue, cap = levelValue(player, "Belt", "Queue") or 2,
 	})
-	if os.clock() < rushUntil then
-		job.Pay = math.floor(job.Pay * Config.LunchRush.Pay)
-		job.Rush = true
-	end
+	if (d.welcome or 0) > 0 then d.welcome -= 1 end
 	local walk = Crowd.length(Crowd.route(arrive, true)) / Config.WalkSpeed
 	job.queuedAt = os.clock() + walk -- patience starts when they get there
 	job.Walk = walk
@@ -1361,43 +1394,31 @@ local function spawnCustomer(player, minRarity)
 	job.Seed = seed
 	table.insert(d.queue, job)
 	d.hungry = nil
+	d.today.Arrived += 1
 	local plot = Plots.indexOf(player)
 	crowd[nextCustomerId] = { player = player, plot = plot, jobId = job.Id, seed = seed, at = os.clock() }
 	QueueChanged:FireClient(player, snapshot(d))
 	CustomerSpawned:FireAllClients({ Id = nextCustomerId, Plot = plot, Owner = player.UserId, JobId = job.Id, Seed = seed, Walk = walk })
 end
 
--- Lunch rush (Config.LunchRush): once a day everyone's garage gets busy at once. workspace.LunchRushEndsAt
--- (server time) tells the clients; jobs that arrive during it pay more.
-Clock.onPhase(function(name)
-	rushUntil = 0
-	workspace:SetAttribute("LunchRushEndsAt", nil)
-	local R = Config.LunchRush
-	rushAt = name == "Day" and os.clock() + Config.DaySeconds * (R.From + math.random() * (R.To - R.From)) or nil
-end)
-local function rushing() return os.clock() < rushUntil end
-
 task.spawn(function()
 	local nextSpawn = 0
 	local avgGap = (Config.ArrivalGap[1] + Config.ArrivalGap[2]) / 2
 	while true do
 		task.wait(0.5)
-		if Clock.phase ~= "Day" then continue end -- night: nobody new comes
+		-- night: nobody new comes, except the welcome customers of someone who just joined (nobody starts
+		-- their session standing at an empty bench)
+		local night = Clock.phase ~= "Day"
 		local now = os.clock()
-		if rushAt and now >= rushAt then
-			rushAt = nil
-			rushUntil = now + Config.LunchRush.Seconds
-			workspace:SetAttribute("LunchRushEndsAt", workspace:GetServerTimeNow() + Config.LunchRush.Seconds)
-			nextSpawn = now -- the first rush customer steps off the bus right away
-		end
-		local list = candidates()
+		local list = candidates(night)
 		if #list == 0 then continue end
-		-- a garage that just ran out of customers gets someone soon
+		-- a garage that just ran out of customers (or just opened) gets someone soon
 		local chosen
 		for _, c in list do
 			local d = data[c.player]
 			if d.hungry and now >= d.hungry and #d.queue == 0 then chosen = c break end
 		end
+		if night and not chosen then continue end
 		if chosen or now >= nextSpawn then
 			chosen = chosen or Spawner.pick(list)
 			spawnCustomer(chosen.player)
@@ -1405,7 +1426,7 @@ task.spawn(function()
 			local rate = 0
 			for _, c in list do rate += 1 / (avgGap * (levelValue(c.player, "Belt", "Gap") or 1)) end
 			local gapNow = Config.ArrivalGap[1] + math.random() * (Config.ArrivalGap[2] - Config.ArrivalGap[1])
-			nextSpawn = now + gapNow / (avgGap * rate) / (rushing() and Config.LunchRush.Rate or 1)
+			nextSpawn = now + gapNow / (avgGap * rate)
 		end
 	end
 end)
