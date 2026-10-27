@@ -103,6 +103,7 @@ function M.blocked(player, e)
 	if d.Kind == "Helper" and player:GetAttribute("Helper") == 1 then return "OWNED" end
 	if d.Kind == "Can" and player:GetAttribute(M.canKey(e.Colour)) ~= nil then return "OWNED" end
 	if d.Kind == "Marketer" and (player:GetAttribute("MarketerNext") or player:GetAttribute("Marketer")) then return "BOOKED" end
+	if d.Kind == "Boost" and player:GetAttribute(d.Attr .. "Next") then return "BOOKED" end
 	if d.Kind == "Pack" and (player:GetAttribute("LookTier") or 1) >= Caro.LookTiers then return "MAX" end
 	if d.Kind == "Crate" and (player:GetAttribute(d.Stock) or 0) >= crateLimit(player, d.Stock) then return "FULL" end
 	return nil
@@ -137,6 +138,8 @@ local function apply(player, e, d)
 	local k = d.Kind
 	if k == "Marketer" then
 		player:SetAttribute("MarketerNext", true) -- tomorrow's customers pick your garage more
+	elseif k == "Boost" then
+		player:SetAttribute(d.Attr .. "Next", true) -- works all of tomorrow (onPhase switches it on at dawn)
 	elseif k == "Helper" then
 		player:SetAttribute("Helper", 1)
 	elseif k == "Pack" then
@@ -218,14 +221,28 @@ function M.refillCan(player, colour)
 	return true
 end
 
--- dawn / dusk: a Marketer booked at night works the next day
+-- The boosters' attributes (Kind = "Boost"): booked as <Attr>Next at night, <Attr> while it works.
+local function boostAttrs()
+	local list = {}
+	for _, d in Caro.Items do
+		if d.Kind == "Boost" and d.Attr then table.insert(list, d.Attr) end
+	end
+	return list
+end
+
+-- dawn / dusk: a Marketer or a booster booked at night works the next day
 function M.onPhase(name, players)
 	for _, p in players do
 		if name == "Day" then
 			p:SetAttribute("Marketer", p:GetAttribute("MarketerNext") == true)
 			p:SetAttribute("MarketerNext", false)
+			for _, a in boostAttrs() do
+				p:SetAttribute(a, p:GetAttribute(a .. "Next") == true)
+				p:SetAttribute(a .. "Next", false)
+			end
 		else
 			p:SetAttribute("Marketer", false)
+			for _, a in boostAttrs() do p:SetAttribute(a, false) end
 		end
 	end
 end
@@ -236,6 +253,11 @@ local PERMANENT = { "GoldenWrench", "ChromePump", "NeonCharger", "TurboLance", "
 function M.collect(player)
 	local rec = { Cans = {}, LookTier = player:GetAttribute("LookTier") or 1, MarketerNext = player:GetAttribute("MarketerNext") == true }
 	for _, a in PERMANENT do rec[a] = player:GetAttribute(a) == 1 and 1 or nil end
+	-- boosters booked for tomorrow survive leaving (like the Marketer)
+	rec.Boosts = {}
+	for _, a in boostAttrs() do
+		if player:GetAttribute(a .. "Next") then rec.Boosts[a] = true end
+	end
 	for _, p in Config.SprayPaints do
 		if p.Special then
 			local loads = player:GetAttribute(M.canKey(p.Name))
@@ -251,6 +273,10 @@ function M.restore(player, rec)
 	player:SetAttribute("LookTier", math.clamp(math.floor(tonumber(rec.LookTier) or 1), 1, Caro.LookTiers))
 	player:SetAttribute("MarketerNext", rec.MarketerNext == true)
 	player:SetAttribute("Marketer", false)
+	for _, a in boostAttrs() do
+		player:SetAttribute(a .. "Next", type(rec.Boosts) == "table" and rec.Boosts[a] == true)
+		player:SetAttribute(a, false)
+	end
 	for _, p in Config.SprayPaints do
 		if p.Special then
 			local loads = type(rec.Cans) == "table" and tonumber(rec.Cans[p.Name]) or nil

@@ -426,10 +426,21 @@ task.delay(4, function()
 	local r = player:GetAttribute("Refunded")
 	if r then popText(("Refund +$%d"):format(r), 0.55, 1.8, GREEN) end
 end)
--- yesterday's day-goal chest (Fever loop): the dawn bonus pops once
-player:GetAttributeChangedSignal("DayBonus"):Connect(function()
-	local b = player:GetAttribute("DayBonus")
-	if b then popText(("Day goal chest +$%d"):format(b), 0.6, 2.2, ui.style.Color.Gold) end
+-- yesterday's day goal (Fever loop, CF's level stars): at dawn the stars you earned, and the chest
+-- if there was one. DayResult = "dawn|stars|bonus", set once per dawn by the server.
+player:GetAttributeChangedSignal("DayResult"):Connect(function()
+	local dawn, stars, bonus = tostring(player:GetAttribute("DayResult") or ""):match("^(%d+)|(%d+)|(%d+)$")
+	if not dawn then return end
+	stars, bonus = tonumber(stars), tonumber(bonus)
+	local row = string.rep("★", stars) .. string.rep("☆", 3 - stars)
+	if stars == 0 then
+		popText("Goal " .. row .. "  Beat it today!", 0.6, 2.4, TAN)
+		return
+	end
+	local text = "Goal " .. row .. (bonus > 0 and ("  Chest +$" .. ui.style.money(bonus)) or "")
+	popText(text, 0.65, 2.6, stars == 3 and ui.style.Color.Gold or GREEN)
+	sfx(SFX.Done, 0.8, 1 + stars * 0.15)
+	if stars == 3 then shake(0.3, 0.3) end
 end)
 
 -- Context offers (plan/12): short need-timed popups — a big customer about to walk, or the
@@ -1413,6 +1424,7 @@ local BENCH_CAM = Vector3.new(4.5, 5.1, 1.45) -- camera relative to you: right, 
 
 ---------------------------------------------------------------- minigames
 local FIX = {}
+local onBackgroundFix -- set by the sessions section: a fix left running in the background (charging) is done
 
 -- Flat tyre: walk over to the floor pump by the bench. The hose clips onto the
 -- valve and your character pumps it up: hold = push the handle down (air goes in
@@ -2207,7 +2219,10 @@ end
 -- Low battery: tap the charger and the plug flies over and clicks into the battery
 -- by itself (a hanging cable follows it). Then sparks zip round the battery: tap them
 -- to charge it faster. The charge shows on the charger's screen, not on yours.
-FIX.Charge = function(m, step)
+-- Low battery. plugCharger does step 1 (tap the charger, the plug hops into the battery) and puts up the
+-- meter; it returns a handle the fix drives: fill it in the background while other fixes are done
+-- (Config.ChargeInBackground), or tap sparks to top it up, then unplug.
+local function plugCharger(m, step, startAt)
 	local dock = myStations:WaitForChild("BatteryDock")
 	local plug, tip = dock.Plug, dock.PlugTip
 	local plugHome = plug.CFrame
@@ -2349,10 +2364,12 @@ FIX.Charge = function(m, step)
 		popScale(shell, 0.9, 0.15)
 	end
 
+	-- its own colour, kept now: the fix on the bench may load another look table while this one charges
+	local batteryColor = orig[battery] and orig[battery].Color or battery.Color
 	local function showCharge(c)
 		c = math.clamp(c, 0, 1)
 		local col = c < 0.5 and EMPTY:Lerp(HALF, c * 2) or HALF:Lerp(FULL, (c - 0.5) * 2)
-		battery.Color = Color3.fromRGB(225, 95, 50):Lerp(orig[battery].Color, c)
+		battery.Color = Color3.fromRGB(225, 95, 50):Lerp(batteryColor, c)
 		bar.Size = UDim2.new(c, c > 0 and -12 * c or 0, 1, -12)
 		bar.BackgroundColor3 = col
 		pct.Text = ("%d%%"):format(math.floor(c * 100))
@@ -2453,86 +2470,173 @@ FIX.Charge = function(m, step)
 		}, 14)
 	end
 
-	-- 2. it charges slowly by itself; sparks circle the battery, each one you tap is a boost
-	setInstruction("Tap the sparks!", step)
-	local center = battery.Position
-	local toCam = (camera.CFrame.Position - center).Unit
-	local face = CFrame.lookAt(center + toCam * 0.4, camera.CFrame.Position)
-	local charge, sparks, nextSpark = 0, {}, 0.15
-	showCharge(0)
-	pendingPress = nil
-	while charge < 1 do
-		local dt = RunService.RenderStepped:Wait()
-		charge += dt * rate
-		nextSpark -= dt
-		if nextSpark <= 0 and #sparks < 3 then
-			nextSpark = 0.45 + math.random() * 0.35
-			-- each spark zips round the battery on its own loop, either way round
-			table.insert(sparks, {
-				part = newSpark(), born = os.clock(),
-				ang = math.random() * math.pi * 2,
-				speed = (2.2 + math.random() * 1.6) * (math.random() < 0.5 and -1 or 1),
-				r = 0.65 + math.random() * 0.45,
-				tilt = 0.6 + math.random() * 0.4,
-			})
-		end
-		for i = #sparks, 1, -1 do
-			local s = sparks[i]
-			local age = os.clock() - s.born
-			if age > 1.8 then
-				fizzle(s.part)
-				table.remove(sparks, i)
-			else
-				s.ang += s.speed * dt
-				-- a little jitter so it buzzes instead of gliding
-				local buzz = (math.random() - 0.5) * 0.06
-				s.part.CFrame = face * CFrame.new(math.cos(s.ang) * (s.r + buzz), math.sin(s.ang) * (s.r + buzz) * s.tilt, 0)
-			end
-		end
-		local press = pendingPress
-		pendingPress = nil
-		if press and state == "repair" and #sparks > 0 then
-			local list = {}
-			for _, s in sparks do table.insert(list, s.part) end
-			local hit = pick(press, list)
-			if hit then
-				charge += boost
-				zap(hit.Position, battery.Position)
-				boostPop(boost)
-				sfx(SFX.Done, 0.45, 1.1 + charge * 0.6)
-				for i, s in sparks do
-					if s.part == hit then
-						table.remove(sparks, i)
-						break
-					end
-				end
-				hit:Destroy()
-			end
-		end
-		showCharge(charge)
-	end
-	for _, s in sparks do fizzle(s.part) end
-	showCharge(1)
-	battery.Color = orig[battery].Color
-	sparkle(battery.Position)
-	sfx(SFX.Done, 0.7, 1.4)
-	-- the warning light goes out
-	for _, p in m:GetChildren() do
-		if p.Name == "WarnLight" and (p.Position - battery.Position).Magnitude < 1.2 then p:Destroy() end
-	end
-	task.wait(0.25)
+	local ch = { charge = startAt or 0 }
+	showCharge(ch.charge)
 
-	-- unplug: the plug hops home, the sign is a sign again
-	local from = plug.CFrame
-	animate(0.35, function(a) setPlug(from:Lerp(plugHome, a) + Vector3.new(0, math.sin(a * math.pi) * 1.2, 0)) end, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-	setPlug(plugHome)
-	cable:Destroy()
-	a0:Destroy()
-	a1:Destroy()
-	if coiled then coiled.Transparency = 0 end
-	if fill then fill:Destroy() end
-	meter:Destroy()
-	if sign then sign.Color, sign.Material = signColor, signMat end
+	-- in the background: it fills at the dock's rate while you do the other fixes; onFull (no yielding)
+	-- runs once when it's full
+	function ch.background(onFull)
+		ch.conn = RunService.RenderStepped:Connect(function(dt)
+			ch.charge += dt * rate
+			showCharge(ch.charge)
+			if ch.charge >= 1 then
+				ch.conn:Disconnect()
+				ch.conn = nil
+				onFull()
+			end
+		end)
+	end
+	function ch.stopBackground()
+		if ch.conn then
+			ch.conn:Disconnect()
+			ch.conn = nil
+		end
+	end
+
+	-- 2. in the foreground: it charges slowly by itself; sparks circle the battery, each one you tap is a boost
+	function ch.topUp()
+		setInstruction("Tap the sparks!", step)
+		local center = battery.Position
+		local toCam = (camera.CFrame.Position - center).Unit
+		local face = CFrame.lookAt(center + toCam * 0.4, camera.CFrame.Position)
+		local charge, sparks, nextSpark = ch.charge, {}, 0.15
+		showCharge(charge)
+		pendingPress = nil
+		while charge < 1 do
+			local dt = RunService.RenderStepped:Wait()
+			charge += dt * rate
+			nextSpark -= dt
+			if nextSpark <= 0 and #sparks < 3 then
+				nextSpark = 0.45 + math.random() * 0.35
+				-- each spark zips round the battery on its own loop, either way round
+				table.insert(sparks, {
+					part = newSpark(), born = os.clock(),
+					ang = math.random() * math.pi * 2,
+					speed = (2.2 + math.random() * 1.6) * (math.random() < 0.5 and -1 or 1),
+					r = 0.65 + math.random() * 0.45,
+					tilt = 0.6 + math.random() * 0.4,
+				})
+			end
+			for i = #sparks, 1, -1 do
+				local s = sparks[i]
+				local age = os.clock() - s.born
+				if age > 1.8 then
+					fizzle(s.part)
+					table.remove(sparks, i)
+				else
+					s.ang += s.speed * dt
+					-- a little jitter so it buzzes instead of gliding
+					local buzz = (math.random() - 0.5) * 0.06
+					s.part.CFrame = face * CFrame.new(math.cos(s.ang) * (s.r + buzz), math.sin(s.ang) * (s.r + buzz) * s.tilt, 0)
+				end
+			end
+			local press = pendingPress
+			pendingPress = nil
+			if press and state == "repair" and #sparks > 0 then
+				local list = {}
+				for _, s in sparks do table.insert(list, s.part) end
+				local hit = pick(press, list)
+				if hit then
+					charge += boost
+					zap(hit.Position, battery.Position)
+					boostPop(boost)
+					sfx(SFX.Done, 0.45, 1.1 + charge * 0.6)
+					for i, s in sparks do
+						if s.part == hit then
+							table.remove(sparks, i)
+							break
+						end
+					end
+					hit:Destroy()
+				end
+			end
+			showCharge(charge)
+		end
+		for _, s in sparks do fizzle(s.part) end
+		ch.charge = charge
+	end
+
+	-- full: the battery's own colour again, a ding, the warning light goes out
+	function ch.full()
+		ch.charge = 1
+		showCharge(1)
+		battery.Color = batteryColor
+		sparkle(battery.Position)
+		sfx(SFX.Done, 0.7, 1.4)
+		for _, p in m:GetChildren() do
+			if p.Name == "WarnLight" and (p.Position - battery.Position).Magnitude < 1.2 then p:Destroy() end
+		end
+		task.wait(0.25)
+	end
+
+	-- unplug: the plug hops home, the sign is a sign again (a half-charged battery keeps its charge)
+	function ch.unplug()
+		ch.stopBackground()
+		local from = plug.CFrame
+		animate(0.35, function(a) setPlug(from:Lerp(plugHome, a) + Vector3.new(0, math.sin(a * math.pi) * 1.2, 0)) end, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+		setPlug(plugHome)
+		cable:Destroy()
+		a0:Destroy()
+		a1:Destroy()
+		if coiled then coiled.Transparency = 0 end
+		if fill then fill:Destroy() end
+		meter:Destroy()
+		if sign then sign.Color, sign.Material = signColor, signMat end
+	end
+	return ch
+end
+
+-- Is there anything else to do on this scooter at the bench while its battery charges? (The booth takes
+-- the scooter away, so a repaint doesn't count: the battery finishes first.)
+local function benchWorkLeft(sess)
+	for _, name in sess.job.Problems do
+		if name ~= "Charge" and name ~= "Paint" and not sess.done[name] then return true end
+	end
+	return false
+end
+
+-- Low battery (Fever, plan/13): plug it in; if the scooter has other bench fixes, it charges in the
+-- background while you do them and pays the moment it's full (onBackgroundFix). Otherwise, or when it's
+-- the last thing left, you tap sparks to top it up as before. Returns "background" when left charging.
+FIX.Charge = function(m, step)
+	local sess = active and active.model == m and active or nil
+	if sess and sess.done.Charge then return end -- it finished in the background a moment ago
+	local ch = sess and sess.charging
+	if ch and ch.finishing then
+		-- it's full and unplugging itself right now: let that finish (it ticks and pays the fix)
+		while sess.charging do task.wait() end
+		return
+	end
+	if not ch then
+		ch = plugCharger(m, step, sess and sess.chargeLevel or 0)
+		if sess then sess.charging = ch end
+		if sess and Config.ChargeInBackground and benchWorkLeft(sess) then
+			popText("Charging... carry on!", 0.55, 1.1, TAN)
+			ch.background(function()
+				-- full while you worked on something else: no yielding in here, so the rest runs on its own
+				-- sess.charging stays set until it's paid, so parking waits for this (stopCharging) and the
+				-- pay can't land on the next job
+				ch.finishing = true
+				task.spawn(function()
+					ch.full()
+					ch.unplug()
+					if sess.bg then sess.bg.Charge = nil end
+					if onBackgroundFix then
+						local ok, err = pcall(onBackgroundFix, sess, "Charge")
+						if not ok then warn("Background charge failed: " .. tostring(err)) end
+					end
+					sess.done.Charge = true
+					sess.charging, sess.chargeLevel = nil, nil
+				end)
+			end)
+			return "background"
+		end
+	end
+	ch.stopBackground()
+	ch.topUp()
+	ch.full()
+	ch.unplug()
+	if sess then sess.charging, sess.chargeLevel = nil, nil end
 end
 
 -- Repaint, in the paint booth (front-left of the garage). The scooter rolls off the
@@ -3641,10 +3745,70 @@ end
 -- Fever parallel bench (plan/12): sessions round-robin at fix boundaries. Park a half-done
 -- job back on the belt (its clock keeps running!), work another, switch back. How many can be
 -- in flight at once comes from the bench tier (Config.ParallelBench).
+-- The next fix on this session. A low battery goes on charge first (once the wash bay is done with it) so
+-- it fills while the other fixes are done; fixes left running in the background (sess.bg) are skipped
+-- until nothing else is left, and a battery still charging finishes before the booth takes the scooter.
 local function nextProblem(sess)
-	for i, name in sess.job.Problems do
+	local bg = sess.bg or {}
+	local problems = sess.job.Problems
+	local charge = table.find(problems, "Charge")
+	if Config.ChargeInBackground and charge and not sess.done.Charge and not bg.Charge then
+		local washing = (table.find(problems, "Mud") and not sess.done.Mud) or (table.find(problems, "Rust") and not sess.done.Rust)
+		if not washing then return "Charge", charge end
+	end
+	for i, name in problems do
+		if not sess.done[name] and not bg[name] then
+			if name == "Paint" and bg.Charge then return "Charge", charge end
+			return name, i
+		end
+	end
+	for i, name in problems do
 		if not sess.done[name] then return name, i end
 	end
+end
+
+-- A battery charging in the background stops when its scooter leaves the bench: the plug goes home and
+-- the charge so far is kept (sess.chargeLevel); back on the bench it's plugged in again from there.
+local function stopCharging(sess)
+	while sess.charging and sess.charging.finishing do task.wait() end -- full right now: let it finish and pay
+	local ch = sess.charging
+	if not ch then return end
+	ch.stopBackground()
+	sess.chargeLevel = ch.charge
+	sess.charging = nil
+	if sess.bg then sess.bg.Charge = nil end
+	ch.unplug()
+end
+
+-- A finished fix pays on the spot (StepDone): coins fly to the counter, and the same fix as the last one
+-- (on any job) is a chain that pays a growing bonus (Config.Chain).
+local function payStep(sess, name)
+	local advance, bonus, chain = 0, 0, 1
+	do
+		local ok, a, b, c = pcall(function() return Remotes.StepDone:InvokeServer(name) end)
+		if ok and type(a) == "number" then advance, bonus, chain = a, tonumber(b) or 0, tonumber(c) or 1 end
+	end
+	sess.advanced = (sess.advanced or 0) + advance -- the TIP chip's sum (the chain bonus is extra)
+	if advance > 0 and sess.model and sess.model.Parent then
+		local sp = camera:WorldToViewportPoint(sess.model:GetPivot().Position)
+		coinsTo(Vector2.new(sp.X, sp.Y), 4 + math.min(chain - 1, 4) * 2)
+	end
+	if chain >= 2 and bonus > 0 then
+		popText(("CHAIN x%d!  +$%d"):format(chain, advance + bonus), 0.6 + math.min(chain, 5) * 0.04, 0.9, ui.style.Color.Gold)
+		sfx(SFX.Done, 0.6, 1 + math.min(chain, 6) * 0.1)
+		shake(0.1 + math.min(chain, 5) * 0.03, 0.15)
+	else
+		popText(("+$%d"):format(advance > 0 and advance or Config.Problems[name].Pay), 0.55, 0.6, GREEN)
+		sfx(SFX.Done, 0.5)
+	end
+end
+
+-- a battery that filled in the background while another fix was going on: tick it off and pay it
+onBackgroundFix = function(sess, name)
+	if sess.done[name] then return end
+	if active == sess then tick(sess, name) else sess.done[name] = true end
+	Config.Fun.fixed(sess.customer)
+	payStep(sess, name)
 end
 
 local function beltSlotCF(i)
@@ -3653,6 +3817,7 @@ local function beltSlotCF(i)
 end
 
 local function park(sess)
+	stopCharging(sess) -- before it slides away (the plug can't follow it down the belt)
 	parked[sess.job.Id] = sess
 	sess.skill = ui.skill.save() -- its perfects, misses and combo wait with it
 	if sess.slotIndex then
@@ -3770,29 +3935,20 @@ local function runSessions(cur)
 				end
 				if outOfStock then
 					-- the restock card ran out: the customer takes it home unfixed (no pay, no review)
+					stopCharging(cur)
 					cur.stopped = true
 					cur.dropped = true
 					ui.ins.Visible = false
 					state = "results"
 					finishJob()
-				else
+				elseif ok and err == "background" then
+					-- left running (a battery on charge): the next fix comes up straight away
+					cur.bg = cur.bg or {}
+					cur.bg[name] = true
+				elseif not cur.done[name] then -- (a background fix may have ticked itself off already)
 					tick(cur, name)
 					Config.Fun.fixed(cur.customer)
-					-- every fix pays the moment it's done (Fever loop): coins fly to the counter
-					local advance = 0
-					do
-						local ok, r = pcall(function() return Remotes.StepDone:InvokeServer(name) end)
-						if ok and type(r) == "number" then advance = r end
-					end
-					cur.advanced = (cur.advanced or 0) + advance
-					if advance > 0 and cur.model and cur.model.Parent then
-						local sp = camera:WorldToViewportPoint(cur.model:GetPivot().Position)
-						coinsTo(Vector2.new(sp.X, sp.Y), 4)
-						popText(("+$%d"):format(advance), 0.55, 0.6, GREEN)
-					else
-						popText(("+$%d"):format(Config.Problems[name].Pay), 0.55, 0.6, GREEN)
-					end
-					sfx(SFX.Done, 0.5)
+					payStep(cur, name) -- every fix pays the moment it's done (Fever loop)
 					task.wait(0.3)
 				end
 			end

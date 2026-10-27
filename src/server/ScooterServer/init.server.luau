@@ -419,6 +419,10 @@ local function makeJob(player, first, minRarity, opts)
 	-- some customers are relaxed, some are in a hurry; bigger jobs buy you more time
 	local persona = Config.Personalities[math.random(#Config.Personalities)]
 	local patience = (persona.Patience + par * Config.PatiencePerPar + math.random(-5, 5)) * (plan and plan.Patience or 1)
+	-- the first days are softer (Config.PatienceByDay)
+	local byDay = Config.PatienceByDay or { 1 }
+	patience *= byDay[math.min(player:GetAttribute("Day") or 1, #byDay)]
+	if player:GetAttribute("Coffee") then patience *= Config.CoffeePatience or 1.35 end -- Caro's booster, today
 	-- a twist on some jobs (rush, picky): not on the very first days' single fixes (the director says when)
 	local mood
 	if plan and plan.Mood then
@@ -766,24 +770,35 @@ end
 
 -- A finished fix pays on the spot (Fever loop, plan/12): an advance on the job's
 -- repair pay; FinishJob subtracts what was already handed over and adds the rest.
+-- Returns advance, chainBonus, chain: the bonus is extra (FinishJob never takes it back).
 StepDone.OnServerInvoke = function(player, name)
 	local d = data[player]
 	local job = currentJob(d)
 	if not job or job.First or type(name) ~= "string" then return 0 end
 	if not table.find(job.Problems, name) or (job.paidSteps and job.paidSteps[name]) then return 0 end
-	-- a fix can't be over sooner than a fraction of its par after the last one on this job: a claim that
-	-- quick is someone skipping the minigame. Nothing is lost by it, FinishJob still pays the whole job.
-	local now = os.clock()
-	if now - (job.lastStepAt or job.started or now) < Config.Problems[name].Par * 0.2 then return 0 end
-	job.lastStepAt = now
+	-- all the fixes paid on a job can't add up to less than a fifth of their pars since it was picked:
+	-- quicker than that is someone skipping the minigames. Nothing is lost by it (FinishJob still pays the
+	-- whole job), and it's a running total, so a battery that finishes charging a second after another
+	-- fix still pays at once.
+	local minSpent = (job.minSpent or 0) + Config.Problems[name].Par * 0.2
+	if os.clock() - (job.started or os.clock()) < minSpent then return 0 end
+	job.minSpent = minSpent
 	job.paidSteps = job.paidSteps or {}
 	job.paidSteps[name] = true
 	local benchPay = (levelValue(player, "Bench", "Pay") or 1) * (1 + Config.Caro.PackPay * ((player:GetAttribute("LookTier") or 1) - 1))
 	local advance = math.max(1, math.floor(Config.Problems[name].Pay * benchPay * (Config.StepPay or 0.55)))
 	job.advanced = (job.advanced or 0) + advance
-	player.leaderstats.Cash.Value += advance
-	d.today.Cash += advance
-	return advance
+	-- chains (Config.Chain): the same fix as the last one, on any job, adds a growing bonus
+	if d.chainFix == name then
+		d.chain = (d.chain or 1) + 1
+	else
+		d.chainFix, d.chain = name, 1
+	end
+	local C = Config.Chain or { Step = 0.25, Max = 0.75 }
+	local bonus = math.floor(advance * math.min((d.chain - 1) * C.Step, C.Max))
+	player.leaderstats.Cash.Value += advance + bonus
+	d.today.Cash += advance + bonus
+	return advance, bonus, d.chain
 end
 
 local function starsFor(job, elapsed)
@@ -1232,6 +1247,7 @@ local function applyPhase(name)
 	local day = name == "Day"
 	for player, d in data do
 		player:SetAttribute("ShopOpen", day)
+		d.chainFix, d.chain = nil, nil -- chains (Config.Chain) don't carry over dusk or dawn
 		if day then
 			-- yesterday's day-goal (Fever loop): stars and a chest bonus at dawn
 			local base = Config.nightCash(player:GetAttribute("Day") or 1)
@@ -1248,6 +1264,11 @@ local function applyPhase(name)
 			if bonus > 0 then
 				player.leaderstats.Cash.Value += bonus
 				player:SetAttribute("DayBonus", bonus)
+			end
+			-- the client's dawn moment (stars + chest); unique per dawn so it fires even when the
+			-- numbers match yesterday's. Not on the server's first dawn: there was no yesterday.
+			if Clock.number > 1 then
+				player:SetAttribute("DayResult", ("%d|%d|%d"):format(Clock.number, stars, bonus))
 			end
 			Director.newDay(player, d.today.Cash)
 			d.today = newDay()

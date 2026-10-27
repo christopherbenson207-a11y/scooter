@@ -78,7 +78,7 @@ local function buy(item, row)
 	if ok then
 		env.sfx(env.SFX.Done, 0.9, 1.1)
 		local k = item.Kind
-		toast(k == "Crate" and "STOCKED!" or k == "Marketer" and "BOOKED FOR TOMORROW!" or k == "Helper" and "MO IS HIRED!" or k == "Pack" and "GARAGE UPGRADED!" or k == "Can" and "NEW CAN ON YOUR RACK!" or "IT'S YOURS!", GREEN)
+		toast(k == "Crate" and "STOCKED!" or (k == "Marketer" or k == "Boost") and "BOOKED FOR TOMORROW!" or k == "Helper" and "MO IS HIRED!" or k == "Pack" and "GARAGE UPGRADED!" or k == "Can" and "NEW CAN ON YOUR RACK!" or "IT'S YOURS!", GREEN)
 	else
 		env.sfx(env.SFX.Tap, 0.8, 0.5)
 		toast(why == "poor" and "Not enough cash!" or why == "soldout" and "Sold out!" or why == "owned" and "You already have it" or "Caro's closed", RED)

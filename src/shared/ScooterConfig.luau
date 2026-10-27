@@ -229,6 +229,14 @@ C.StepPay = 0.55 -- each finished fix pays this fraction of its pay on the spot 
 C.SpeedTip = { Max = 0.2, TillPar = 1.0, Gone = 2.5 } -- a tip on the repair pay: full at par, gone by 2.5x par
 C.DayGoals = { Low = 0.8, Med = 1.1, High = 1.45 } -- today's cash goal in nightCash units: 1/2/3 stars + a dawn chest
 C.ParallelBench = { Tier2 = 2, Tier4 = 3 } -- how many jobs can be in flight at once, by bench tier (plan/12)
+-- Chains (plan/13, Diner Dash's chain bonus): the same fix twice or more in a row, on any jobs, pays each
+-- link's step pay x (1 + Step per link after the first), up to +Max. A different fix starts a new chain.
+-- The belt shows every scooter's fixes, so lining up four flat tyres is a plan, not luck.
+C.Chain = { Step = 0.25, Max = 0.75 }
+-- Background charging (plan/13, CF's grill): plug a low battery in and carry on with the scooter's other
+-- fixes; it fills at the dock's Rate by itself and pays the moment it's full. With nothing else to do on
+-- that scooter you tap sparks as before.
+C.ChargeInBackground = true
 
 -- The shop runs in days. When a day ends no new customers come; finish the ones
 -- waiting, take the trash out to the dumpster and the next day starts.
@@ -256,6 +264,10 @@ C.Caro = {
 		{ Id = "MysteryBox", Kind = "Mystery", Icon = "rbxassetid://132192590966199", Title = "Mystery Crate", Desc = "One random rare inside. No refunds, no regrets.", Chance = 0.45, Qty = 2, Price = 2500, Rare = true, Product = 0, Robux = 0 },
 		{ Id = "RareCan", Kind = "Can", Icon = "rbxassetid://77877862136147", Title = "Rare paint can", Desc = "A can for your booth rack that never runs out of the colour", Chance = 0.40, Qty = 3, Price = 6000, Rare = true, Product = 0, Robux = 29 },
 		{ Id = "Pack", Kind = "Pack", Icon = "rbxassetid://100853534545540", Title = "Garage Upgrade Pack", Desc = "A fancier garage and 10% more pay", Chance = 0.25, Qty = 2, Price = 40000, Product = 0, Rare = true, Robux = 99 },
+		-- plan/13, CF's pre-level boosters: a Boost is booked at night and works all of tomorrow (Attr is set
+		-- at dawn; the effect is read where it applies, e.g. Coffee in makeJob). Cheap, so it's a real choice
+		-- every night rather than a rare.
+		{ Id = "Coffee", Kind = "Boost", Attr = "Coffee", Icon = "rbxassetid://75647735250742", Title = "Free coffee", Desc = "Tomorrow, customers wait 35% longer", Chance = 0.55, Qty = 4, Price = 350, Product = 0, Robux = 0 },
 		{ Id = "Marketer", Kind = "Marketer", Icon = "rbxassetid://127703785941799", Title = "Marketer", Desc = "Tomorrow, customers pick your garage 60% more", Chance = 0.20, Qty = 1, Price = 25000, Product = 0, Rare = true, Robux = 19 },
 		{ Id = "Helper", Kind = "Helper", Icon = "rbxassetid://119114328487433", Title = "Helper Mo", Desc = "Fixes scooters while you're away", Chance = 0.12, Qty = 1, Price = 50000, Product = 0, Rare = true, Robux = 299 },
 		{ Id = "GoldenWrench", Kind = "Tool", Icon = "rbxassetid://71441819598102", Attr = "GoldenWrench", Title = "Golden Wrench", Desc = "Bolt zone 25% bigger, on top of your wrench", Chance = 0.10, Qty = 1, Price = 12000, Rare = true, Product = 0, Robux = 49 },
@@ -267,6 +279,7 @@ C.Caro = {
 -- Customers choose a garage by its stars: weight = (0.35 + rating / 5) ^ 2 (no reviews yet counts as 3.5 stars).
 C.UnratedAs = 3.5
 C.MarketerBoost = 1.6 -- a garage with an active Marketer (Caro's market, later)
+C.CoffeePatience = 1.35 -- Caro's Free coffee booster: customers' patience x this for a day
 C.NewGarageBoost = 1.5 -- a player's first day: a few extra customers while they learn
 C.WalkSpeed = 14 -- studs per second customers walk (with ScooterCrowd.WalkIn, how long they take to reach you)
 C.DayLength = 300 -- seconds the shop is open each day (shop/ride time doesn't count)
@@ -278,13 +291,17 @@ C.EmptyArrival = 3 -- if nobody is waiting when you finish, the next one comes t
 -- How long a waiting customer stays before walking off: depends on who they are,
 -- plus extra time for every fix their scooter needs. Their clocks never stop (Fever rule,
 -- plan/12): not in the shop, not on a test ride.
+-- Fever pacing (plan/13): at 120-240 s nobody ever walked out, so waiting had no stakes. These are about
+-- Cooking Fever's feel for a garage (a one-fix job's owner waits ~1.5-2 min, a big job's ~3), and the
+-- first days are softer while you learn (PatienceByDay, the last entry holds from then on).
 C.Personalities = {
-	{ Name = "Chill", Patience = 240 },
-	{ Name = "Normal", Patience = 180 },
-	{ Name = "Rushed", Patience = 120 },
+	{ Name = "Chill", Patience = 110 },
+	{ Name = "Normal", Patience = 85 },
+	{ Name = "Rushed", Patience = 60 },
 }
 C.PatiencePerFix = 20 -- (old rule, kept for reference; patience now grows with the job's par)
-C.PatiencePerPar = 2.5 -- plan/06: + 2.5 s of patience for every second of par, so a big job doesn't make them cross
+C.PatiencePerPar = 1.8 -- + 1.8 s of patience for every second of par, so a big job doesn't make them cross
+C.PatienceByDay = { 1.6, 1.3, 1.1, 1.0 }
 -- "Hang on!" (plan/06): shows when a waiting customer is down to Below of their patience; every waiting customer
 -- gets Back of their patience back, once each, then the button rests Cooldown seconds.
 C.HangOn = { Below = 0.3, Back = 0.25, Cooldown = 45 }
