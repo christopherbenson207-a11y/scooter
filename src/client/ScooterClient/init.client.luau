@@ -131,6 +131,11 @@ local function inFlight()
 	for _ in parked do n += 1 end
 	return n
 end
+-- the bench's pay multiplier, worked out the way the server does (bench level x Caro's upgrade packs)
+local function benchPay()
+	local pay = Config.stat("Bench", player:GetAttribute("Bench") or 1, "Pay") or 1
+	return pay * (1 + Config.Caro.PackPay * ((player:GetAttribute("LookTier") or 1) - 1))
+end
 local origs = {} -- [scooter model] = { [part] = original look }
 local orig = {}
 
@@ -3409,15 +3414,21 @@ local function buildJobCard(job)
 	ui.tipChip = tipChip
 	ui.jobCount()
 end
-local function tick(sess, name)
+-- a row ticked off on the job card (pop = the little bounce when it's just been done)
+local function markRow(name, pop)
 	local r = rows[name]
 	if not r then return end
 	r:SetAttribute("Done", true)
 	r.BackgroundColor3 = ui.style.tone(GREEN, -0.3)
 	r.Box.Tick.Visible = true
 	r.Text.TextColor3 = Color3.new(1, 1, 1)
-	popScale(r.Box, 0.4, 0.3)
+	if pop then popScale(r.Box, 0.4, 0.3) end
 	ui.jobCount()
+end
+-- a fix finished: the session remembers it (so the next fix comes up) and the card ticks it off
+local function tick(sess, name)
+	if sess then sess.done[name] = true end
+	markRow(name, true)
 	ui.moments.cheer(sess and sess.customer)
 end
 
@@ -3481,7 +3492,9 @@ RunService.RenderStepped:Connect(function()
 	if chip and chip.Parent then
 		local ST = Config.SpeedTip or { Max = 0.2, TillPar = 1.0, Gone = 2.5 }
 		local f = math.clamp(1 - (elapsed / math.max(active.job.Par, 1) - ST.TillPar) / (ST.Gone - ST.TillPar), 0, 1)
-		chip.Text = f > 0 and ("TIP +$" .. ui.style.money(math.floor(active.job.Pay * ST.Max * f))) or "NO TIP"
+		-- the same sum FinishJob makes: the tip is on what's still owed (the per-fix advances are paid already)
+		local owed = math.max(0, math.floor(active.job.Pay * benchPay()) - (active.advanced or 0))
+		chip.Text = f > 0 and ("TIP +$" .. ui.style.money(math.floor(owed * ST.Max * f))) or "NO TIP"
 		chip.TextColor3 = f > 0.5 and GREEN or f > 0 and TAN or RED
 	end
 	local n = starsFor(active.job.Par, elapsed)
@@ -3641,6 +3654,7 @@ end
 
 local function park(sess)
 	parked[sess.job.Id] = sess
+	sess.skill = ui.skill.save() -- its perfects, misses and combo wait with it
 	if sess.slotIndex then
 		sess.slotCF = beltSlotCF(sess.slotIndex)
 		if sess.model and sess.model.Parent then slideModel(sess.model, sess.slotCF, 1.2, nil, true) end
@@ -3680,6 +3694,9 @@ local function switchCard(sess)
 	active = sess
 	pcall(function() Remotes.SwitchCurrent:InvokeServer(sess.job.Id) end)
 	buildJobCard(sess.job)
+	for name in sess.done do markRow(name, false) end -- the fixes it already had stay ticked
+	ui.skill.load(sess.skill) -- a fresh job starts from zero, a parked one picks up where it was
+	sess.skill = nil
 	shownStars = 5
 	setStars(ui.timer.Stars, 5)
 	state = "repair"
@@ -3767,6 +3784,7 @@ local function runSessions(cur)
 						local ok, r = pcall(function() return Remotes.StepDone:InvokeServer(name) end)
 						if ok and type(r) == "number" then advance = r end
 					end
+					cur.advanced = (cur.advanced or 0) + advance
 					if advance > 0 and cur.model and cur.model.Parent then
 						local sp = camera:WorldToViewportPoint(cur.model:GetPivot().Position)
 						coinsTo(Vector2.new(sp.X, sp.Y), 4)
@@ -3804,7 +3822,9 @@ local function runSessions(cur)
 				end
 				if state == "results" then finishJob() end
 			end
-			while active == cur do task.wait(0.1) end -- a test ride hands it back itself
+			-- a test ride hands it back itself; a dropped job (out of stock) was handed back already, and
+			-- the top of this loop pointed `active` at it again, so waiting on it would never end
+			while active == cur and not cur.dropped do task.wait(0.1) end
 			-- next parked job, or back to the street
 			local nxtId, nxt = next(parked)
 			if nxt then
@@ -4303,6 +4323,7 @@ local function syncQueue(list)
 		local waitCF = WAIT_SPOTS[slotI + 1] or WAIT_SPOTS[#WAIT_SPOTS]
 		if q then
 			q.slotCF = slotCF
+			q.slotIndex = slotI -- it moved up the belt: if it's picked and parked later, it comes back here
 			-- the server's clock is the truth (it stops while you're busy)
 			if q.customer and job.Age then q.customer.expires = pclock() + q.customer.patience - job.Age end
 		end
@@ -4422,7 +4443,7 @@ startSession = function(id)
 	local pp = q.model and q.model:FindFirstChildWhichIsA("ProximityPrompt", true)
 	if pp then pp:Destroy() end
 	updateList()
-	ui.skill.reset()
+	-- (no skill reset here: a mid-repair pick still has the current job's counts; switchCard swaps them)
 	local sess = {
 		job = job, model = q.model, started = os.clock(), customer = q.customer,
 		slotIndex = q.slotIndex, done = {},
@@ -4472,6 +4493,7 @@ function pickJob(id)
 		state = "idle"
 		return
 	end
+	ui.skill.reset() -- nothing else is in flight: this job's perfects and misses start from zero
 	shownStars = 5
 	setStars(ui.timer.Stars, 5)
 	ui.timer.Visible = true

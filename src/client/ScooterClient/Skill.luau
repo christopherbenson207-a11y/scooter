@@ -30,6 +30,19 @@ function Skill.counts()
 	return perfect, miss, combo
 end
 
+-- Parallel bench: each job in flight keeps its own counts. save() when a job is parked, load() when it
+-- comes back to the bench (load(nil) = a fresh job, from zero).
+function Skill.save()
+	return { perfect = perfect, miss = miss, combo = combo }
+end
+function Skill.load(t)
+	if t then
+		perfect, miss, combo = t.perfect, t.miss, t.combo
+	else
+		perfect, miss, combo = 0, 0, 0
+	end
+end
+
 -- A word that pops up at a world point and floats off.
 local function float(at, text, color, big)
 	local anchor = Instance.new("Part")

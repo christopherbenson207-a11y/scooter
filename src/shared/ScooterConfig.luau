@@ -276,8 +276,8 @@ C.ArrivalGap = { 12, 20 } -- seconds between customers arriving (random in this 
 C.FirstArrival = 2 -- first customer comes this long after your own scooter is fixed
 C.EmptyArrival = 3 -- if nobody is waiting when you finish, the next one comes this soon
 -- How long a waiting customer stays before walking off: depends on who they are,
--- plus extra time for every fix their scooter needs. Their clocks (and arrivals)
--- stop while you're in the shop or on a test ride.
+-- plus extra time for every fix their scooter needs. Their clocks never stop (Fever rule,
+-- plan/12): not in the shop, not on a test ride.
 C.Personalities = {
 	{ Name = "Chill", Patience = 240 },
 	{ Name = "Normal", Patience = 180 },
@@ -291,9 +291,8 @@ C.HangOn = { Below = 0.3, Back = 0.25, Cooldown = 45 }
 -- Lunch rush (24 Oct): once a day, somewhere between From and To of the day, for Seconds, customers come Rate
 -- times as often and pay Pay times more. Every garage gets busy at once.
 C.LunchRush = { From = 0.35, To = 0.65, Seconds = 60, Rate = 2.5, Pay = 1.25 }
--- Patience runs out = fully angry (steam, stomping), but they keep waiting.
--- They only walk out after this many times their patience. Waiting never costs
--- stars: stars only count from when you pick the job.
+-- They walk out after this many times their patience (1.0 = the moment it's gone) and leave a bad review.
+-- Stars still only count from when you pick the job; a picked job's clock keeps running even while parked.
 C.LeaveAfter = 1.0 -- Fever rule: when their patience is gone, they take their scooter and go (plan/12)
 C.WalkOutReview = 1 -- a customer who walks out leaves this many stars on your rating
 C.FixCountWeights = { 50, 35, 15 } -- (fallback only) chance of a job needing 1, 2 or 3 fixes

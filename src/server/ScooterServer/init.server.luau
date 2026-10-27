@@ -771,6 +771,11 @@ StepDone.OnServerInvoke = function(player, name)
 	local job = currentJob(d)
 	if not job or job.First or type(name) ~= "string" then return 0 end
 	if not table.find(job.Problems, name) or (job.paidSteps and job.paidSteps[name]) then return 0 end
+	-- a fix can't be over sooner than a fraction of its par after the last one on this job: a claim that
+	-- quick is someone skipping the minigame. Nothing is lost by it, FinishJob still pays the whole job.
+	local now = os.clock()
+	if now - (job.lastStepAt or job.started or now) < Config.Problems[name].Par * 0.2 then return 0 end
+	job.lastStepAt = now
 	job.paidSteps = job.paidSteps or {}
 	job.paidSteps[name] = true
 	local benchPay = (levelValue(player, "Bench", "Pay") or 1) * (1 + Config.Caro.PackPay * ((player:GetAttribute("LookTier") or 1) - 1))
@@ -1016,7 +1021,7 @@ UseTyre.OnServerInvoke = function(player, borrow) return useStock(player, borrow
 -- Any colour other than the one the customer asked for is the wrong colour.
 UsePaint.OnServerInvoke = function(player, name)
 	local d = data[player]
-	local job = d and d.active
+	local job = currentJob(d) -- the job on the bench (parallel bench: d.actives[d.current])
 	if not job or job.paintedWith or not table.find(job.Problems, "Paint") then return false end
 	local def
 	for _, p in Config.SprayPaints do
